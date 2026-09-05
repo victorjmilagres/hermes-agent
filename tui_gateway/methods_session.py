@@ -328,7 +328,8 @@ def _(rid, params: dict) -> dict:
             "running": False, "session_key": key, "show_reasoning": _load_show_reasoning(), "source": source,
             "slash_worker": None, "tool_progress_mode": _load_tool_progress_mode(), "tool_started_at": {},
             "transport": current_transport() or _stdio_transport}
-        _register_session_cwd(_sessions[sid])
+        if not _gateway_stateless():
+            _register_session_cwd(_sessions[sid])
     # No DB row here (drafts left "Untitled" litter): created on the first prompt — except seeded branch children.
     # NOTE: we intentionally do NOT persist a DB row here. Every TUI/desktop launch (and every "New agent" /
     # draft) opens a session here just to paint the composer, so eagerly creating a row left an "Untitled"
@@ -342,11 +343,12 @@ def _(rid, params: dict) -> dict:
     # optimistic row vanishes on restart. Persisting up front also means a restart keeps the branch (both
     # reports lost it) and the title lands in the parent's lineage instead of falling back to a
     # message-preview name. Title mirrors the TUI /branch naming.
-    if parent_session_id and history:
+    if not _gateway_stateless() and parent_session_id and history:
         _seed_branch_row(_sessions[sid], key, parent_session_id, history, source, profile_home)
     # Return immediately so Ink can paint; the AIAgent builds right after the flush.
     _schedule_agent_build(sid)
-    _schedule_session_cap_enforcement()  # trim detached idle sessions over the cap
+    if not _gateway_stateless():
+        _schedule_session_cap_enforcement()  # trim detached idle sessions over the cap
     cwd = _sessions[sid]["cwd"]
     override = session_model_override or {}
     return _ok(rid, {

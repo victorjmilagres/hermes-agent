@@ -214,6 +214,29 @@ def test_returns_turn_context_with_user_message_appended():
     assert ctx.active_system_prompt == "SYSTEM"
 
 
+def test_no_tools_turn_skips_bot_tool_and_pre_llm_plugin_context(monkeypatch):
+    agent = _FakeAgent()
+    agent.no_tools = True
+
+    def inject_bot_tool(target):
+        target.tools.append({"function": {"name": "message_agent"}})
+        target.valid_tool_names.add("message_agent")
+
+    hook_calls = []
+    monkeypatch.setattr("tools.bot_mode_dm.ensure_message_agent_tool", inject_bot_tool)
+    monkeypatch.setattr(
+        "hermes_cli.lifecycle.invoke_hook",
+        lambda name, **_kwargs: hook_calls.append(name) or [{"context": "INJECTED_BY_PLUGIN"}],
+    )
+
+    ctx = _build(agent)
+
+    assert agent.tools == []
+    assert agent.valid_tool_names == set()
+    assert ctx.plugin_user_context == ""
+    assert "pre_llm_call" not in hook_calls
+
+
 def test_preflight_timeout_stops_turn_before_provider_boundary():
     """An unchanged oversized payload must not escape turn construction."""
     agent = _FakeAgent()

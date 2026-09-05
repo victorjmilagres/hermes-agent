@@ -546,3 +546,15 @@ class TestBridgeDispatch:
             out = handle_function_call("tool_call", {"name": "mcp_x"}, task_id="t")
         assert json.loads(out) == {"ok": True}
         assert disp.call_args.args[0] == "mcp_x" and disp.call_args.args[1] == {"a": 1}
+
+
+def test_importing_agent_facade_does_not_discover_model_tools():
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [sys.executable, "-c", "import sys, run_agent; assert 'model_tools' not in sys.modules"],
+        text=True,
+        capture_output=True,
+    )
+    assert proc.returncode == 0, proc.stderr

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 from agent.message_sanitization import (
@@ -39,6 +40,40 @@ def _set_extra_header(api_kwargs: Any, key: str, value: str) -> None:
     _xh = dict(api_kwargs.get("extra_headers") or {})
     _xh[key] = value
     api_kwargs["extra_headers"] = _xh
+
+
+_PROVIDER_TOOL_FIELD_KEYS = frozenset({
+    "tools", "toolchoice", "functions", "functioncall", "functiondeclarations",
+    "toolconfig", "functioncallingconfig", "paralleltoolcalls", "allowedtools",
+})
+
+
+def _provider_tool_field_path(value: Any, path: str = "request") -> str | None:
+    """Return the first provider-recognized tool-schema field in a JSON-like payload."""
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            key_text = str(key)
+            child_path = f"{path}.{key_text}"
+            normalized = "".join(char for char in key_text.lower() if char.isalnum())
+            if normalized in _PROVIDER_TOOL_FIELD_KEYS:
+                return child_path
+            if found := _provider_tool_field_path(child, child_path):
+                return found
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            if found := _provider_tool_field_path(child, f"{path}[{index}]"):
+                return found
+    return None
+
+
+def enforce_no_tools_request(agent: Any, api_kwargs: Any) -> None:
+    """Fail closed if the final provider payload violates zero-tools mode."""
+    if not getattr(agent, "no_tools", False):
+        return
+    if field_path := _provider_tool_field_path(api_kwargs):
+        raise RuntimeError(
+            f"Zero-tools invariant violated: provider request contains tool field {field_path}"
+        )
 
 
 def _fire_pre_api_request_hook(
@@ -161,13 +196,15 @@ def build_api_request(
         _original_api_kwargs = dict(api_kwargs)
         _llm_middleware_trace = []
 
-    _fire_pre_api_request_hook(
-        agent, api_kwargs, api_messages, _llm_middleware_trace, messages=messages,
-        original_user_message=original_user_message, approx_tokens=approx_tokens,
-        total_chars=total_chars, retry_count=retry_count, api_call_count=api_call_count,
-        api_request_id=api_request_id, api_start_time=api_start_time,
-        effective_task_id=effective_task_id, turn_id=turn_id,
-    )
+    enforce_no_tools_request(agent, api_kwargs)
+    if not getattr(agent, "no_tools", False):
+        _fire_pre_api_request_hook(
+            agent, api_kwargs, api_messages, _llm_middleware_trace, messages=messages,
+            original_user_message=original_user_message, approx_tokens=approx_tokens,
+            total_chars=total_chars, retry_count=retry_count, api_call_count=api_call_count,
+            api_request_id=api_request_id, api_start_time=api_start_time,
+            effective_task_id=effective_task_id, turn_id=turn_id,
+        )
 
     if env_var_enabled("HERMES_DUMP_REQUESTS"):
         agent._dump_api_request_debug(api_kwargs, reason="preflight")

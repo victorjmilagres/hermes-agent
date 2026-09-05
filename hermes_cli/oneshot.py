@@ -41,6 +41,20 @@ def _normalize_toolsets(toolsets: object = None) -> list[str] | None:
     return [p.strip() for chunk in parts for p in chunk if p.strip()] or None
 
 
+def _resolve_zero_tools(
+    no_tools: bool, toolsets: object, *, command_label: str = "hermes -z",
+) -> tuple[bool, str | None]:
+    normalized = _normalize_toolsets(toolsets)
+    normalized_lower = [value.lower() for value in normalized or []]
+    if "none" in normalized_lower:
+        if any(value != "none" for value in normalized_lower):
+            return False, f"{command_label}: --toolsets none is exclusive and cannot be combined.\n"
+        return True, None
+    if no_tools and normalized:
+        return False, f"{command_label}: --no-tools cannot be combined with --toolsets.\n"
+    return bool(no_tools), None
+
+
 def _normalize_skills(skills: object = None) -> list[str]:
     """Normalize repeated/comma-separated skill flags and preserve order."""
     return list(dict.fromkeys(_normalize_toolsets(skills) or []))
@@ -167,6 +181,12 @@ def run_oneshot(
     toolsets: object = None,
     skills: object = None,
     usage_file: Optional[str] = None,
+    no_tools: bool = False,
+    skip_context_files: bool = False,
+    skip_memory: bool = False,
+    skip_background_review: bool = False,
+    disable_fallbacks: bool = False,
+    disable_session_persistence: bool = False,
 ) -> int:
     """Execute a single prompt and print only the final content block.
 
@@ -188,15 +208,26 @@ def run_oneshot(
         )
         return 2
 
-    explicit_toolsets, toolsets_error = _validate_explicit_toolsets(toolsets)
+    no_tools, zero_tools_error = _resolve_zero_tools(no_tools, toolsets)
+    if zero_tools_error:
+        sys.stderr.write(zero_tools_error)
+        return 2
+    if no_tools:
+        skip_context_files = True
+        skip_memory = True
+        skip_background_review = True
+        disable_fallbacks = True
+        disable_session_persistence = True
+    explicit_toolsets, toolsets_error = ([], None) if no_tools else _validate_explicit_toolsets(toolsets)
     if toolsets_error:
         sys.stderr.write(toolsets_error)
         return 2
-    use_config_toolsets = _normalize_toolsets(toolsets) is None
+    use_config_toolsets = not no_tools and _normalize_toolsets(toolsets) is None
 
     # Non-interactive by definition — an approval prompt would hang forever.
     os.environ["HERMES_YOLO_MODE"] = "1"
-    os.environ["HERMES_ACCEPT_HOOKS"] = "1"
+    if not no_tools:
+        os.environ["HERMES_ACCEPT_HOOKS"] = "1"
 
     # Nothing here drains process_registry.completion_queue (only cli.py's process_loop and the
     # gateway watchers do), so left unbound delegate_task would be forced background and every
@@ -220,6 +251,12 @@ def run_oneshot(
                 toolsets=explicit_toolsets,
                 use_config_toolsets=use_config_toolsets,
                 skills=skills,
+                no_tools=no_tools,
+                skip_context_files=skip_context_files,
+                skip_memory=skip_memory,
+                skip_background_review=skip_background_review,
+                disable_fallbacks=disable_fallbacks,
+                disable_session_persistence=disable_session_persistence,
             )
         except BaseException as exc:  # noqa: BLE001
             # Capture anything escaping the agent (OSError from prompt_toolkit on a non-TTY pipe,
@@ -238,6 +275,13 @@ def run_oneshot(
         return 1
 
     _write_usage_file(usage_file, result)
+
+    unsuccessful = result.get("failed") or result.get("partial") or not result.get("completed", True)
+    run_error = (result.get("error") or result.get("final_response") or response or "run did not complete") if unsuccessful else None
+    if run_error:
+        real_stderr.write(f"hermes -z: {run_error}\n")
+        real_stderr.flush()
+        return 2
 
     if response:
         # Lone UTF-16 surrogates would raise UnicodeEncodeError on a real stdout and abort with
@@ -347,6 +391,12 @@ def _run_agent(
     toolsets: object = None,
     use_config_toolsets: bool = True,
     skills: object = None,
+    no_tools: bool = False,
+    skip_context_files: bool = False,
+    skip_memory: bool = False,
+    skip_background_review: bool = False,
+    disable_fallbacks: bool = False,
+    disable_session_persistence: bool = False,
 ) -> tuple[str, dict]:
     """Build an AIAgent exactly like a normal CLI chat turn, run one conversation, and return
     ``(final_response, run_result)``. Imports are local to keep CLI startup cheap."""
@@ -377,11 +427,12 @@ def _run_agent(
     # ONE turn and no between-turns late-binding refresh (#38448).
     from hermes_cli.mcp_startup import ensure_mcp_discovery_before_agent_build
 
-    ensure_mcp_discovery_before_agent_build(logger=logging.getLogger(__name__), single_query=True)
+    if not no_tools:
+        ensure_mcp_discovery_before_agent_build(logger=logging.getLogger(__name__), single_query=True)
 
-    skills_prompt = _build_preloaded_skills_prompt(skills)
+    skills_prompt = None if no_tools else _build_preloaded_skills_prompt(skills)
 
-    session_db = _create_session_db_for_oneshot()
+    session_db = None if disable_session_persistence else _create_session_db_for_oneshot()
     # The try spans agent construction (not just ``chat``) so the store is always closed, even when
     # ``AIAgent(...)`` raises — the one-shot exit path hard-exits via os._exit and skips finalizers.
     agent = None
@@ -394,12 +445,17 @@ def _run_agent(
             api_mode=runtime.get("api_mode"),
             model=choice.model,
             enabled_toolsets=toolsets_list,
+            no_tools=no_tools,
             quiet_mode=True,
             platform="cli",
             session_db=session_db,
             credential_pool=runtime.get("credential_pool"),
-            fallback_model=get_fallback_chain(cfg) or None,
+            fallback_model=None if disable_fallbacks else (get_fallback_chain(cfg) or None),
             ephemeral_system_prompt=skills_prompt,
+            skip_context_files=skip_context_files,
+            skip_memory=skip_memory,
+            skip_background_review=skip_background_review,
+            disable_session_persistence=disable_session_persistence,
             # The only interactive callback wired: no user sits at a terminal. Sudo prompts gate on
             # HERMES_INTERACTIVE (never set), hook approval via HERMES_ACCEPT_HOOKS=1, dangerous
             # commands via HERMES_YOLO_MODE=1, skill secret capture degrades gracefully.

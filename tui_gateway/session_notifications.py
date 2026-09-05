@@ -498,6 +498,8 @@ _notification_pollers: list = []
 
 def _start_notification_poller(sid: str, session: dict) -> threading.Event:
     """Start the background notification poller for a TUI session (thread name is greppable)."""
+    if _gateway_stateless():
+        return threading.Event()
     _wire_desktop_sinks()
     stop = threading.Event()
     t = threading.Thread(target=_notification_poller_loop, args=(stop, sid, session), daemon=True, name=f"tui-notif-poller-{sid}")

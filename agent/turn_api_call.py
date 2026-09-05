@@ -85,15 +85,29 @@ def perform_api_call(
                 next_api_kwargs, allow_stream=False, is_github_responses=agent._is_copilot_url(),
                 sanitize_harmony_tokens=agent._is_codex_backend(),
             )
+        # This is the final common provider boundary: execution middleware and the
+        # transport preflight have both run, and the next call opens the wire request.
+        from agent.turn_api_request import enforce_no_tools_request
+        enforce_no_tools_request(agent, next_api_kwargs)
         if _use_streaming:
             return agent._interruptible_streaming_api_call(
                 next_api_kwargs, on_first_delta=_stop_spinner
             )
+        if getattr(agent, "no_tools", False):
+            return agent._interruptible_api_call(next_api_kwargs)
+
         from agent import relay_llm
+
+        def _wire_call(final_api_kwargs):
+            # Relay codecs/middleware may rewrite the request.  This callback is
+            # the last Hermes-owned boundary before the provider client opens
+            # the wire, so validate the rewritten payload here as well.
+            enforce_no_tools_request(agent, final_api_kwargs)
+            return agent._interruptible_api_call(final_api_kwargs)
 
         return relay_llm.execute(
             next_api_kwargs,
-            agent._interruptible_api_call,
+            _wire_call,
             session_id=str(agent.session_id or ""),
             name=str(agent.provider or "provider"),
             model_name=str(agent.model or ""),
@@ -112,7 +126,6 @@ def perform_api_call(
             defer_logical_completion=True,
         )
 
-    from hermes_cli.middleware import run_llm_execution_middleware
 
     # The ``_model_request_active`` bracket is taken under the redirect lock when one exists,
     # so redirect() can't observe a half-toggled flag.
@@ -123,13 +136,17 @@ def perform_api_call(
         if _model_request_active is not None:
             _model_request_active.set()
     try:
-        response = run_llm_execution_middleware(
-            api_kwargs, _perform_api_call, original_request=_original_api_kwargs,
-            task_id=effective_task_id, turn_id=turn_id, api_request_id=api_request_id,
-            session_id=agent.session_id or "", platform=agent.platform or "", model=agent.model,
-            provider=agent.provider, base_url=agent.base_url, api_mode=agent.api_mode,
-            api_call_count=api_call_count, middleware_trace=list(_llm_middleware_trace),
-        )
+        if getattr(agent, "no_tools", False):
+            response = _perform_api_call(api_kwargs)
+        else:
+            from hermes_cli.middleware import run_llm_execution_middleware
+            response = run_llm_execution_middleware(
+                api_kwargs, _perform_api_call, original_request=_original_api_kwargs,
+                task_id=effective_task_id, turn_id=turn_id, api_request_id=api_request_id,
+                session_id=agent.session_id or "", platform=agent.platform or "", model=agent.model,
+                provider=agent.provider, base_url=agent.base_url, api_mode=agent.api_mode,
+                api_call_count=api_call_count, middleware_trace=list(_llm_middleware_trace),
+            )
     finally:
         with _bracket:
             if _model_request_active is not None:

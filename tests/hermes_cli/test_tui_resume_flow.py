@@ -236,7 +236,10 @@ def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
 
     with pytest.raises(SystemExit):
         main_mod._launch_tui(
-            model="nous/hermes-test", provider="nous", toolsets="web, terminal"
+            model="nous/hermes-test", provider="nous", toolsets=None,
+            no_tools=True, no_context_files=True, no_memory=True,
+            no_background_review=True, no_fallbacks=True,
+            no_session_persistence=True,
         )
 
     env = captured["env"]
@@ -244,7 +247,12 @@ def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
     assert env["HERMES_INFERENCE_MODEL"] == "nous/hermes-test"
     assert env["HERMES_TUI_PROVIDER"] == "nous"
     assert env["HERMES_INFERENCE_PROVIDER"] == "nous"
-    assert env["HERMES_TUI_TOOLSETS"] == "web,terminal"
+    assert env["HERMES_TUI_NO_TOOLS"] == "1"
+    assert env["HERMES_TUI_NO_CONTEXT_FILES"] == "1"
+    assert env["HERMES_TUI_NO_MEMORY"] == "1"
+    assert env["HERMES_TUI_NO_BACKGROUND_REVIEW"] == "1"
+    assert env["HERMES_TUI_NO_FALLBACKS"] == "1"
+    assert env["HERMES_TUI_NO_SESSION_PERSISTENCE"] == "1"
     active_path = Path(env["HERMES_TUI_ACTIVE_SESSION_FILE"])
     assert active_path.name.startswith("hermes-tui-active-session-")
     assert active_path.suffix == ".json"

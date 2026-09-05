@@ -61,3 +61,40 @@ def test_plugin_discovery_runs_for_plain_chat(monkeypatch):
     calls = _install_discover_spy(monkeypatch)
     main_mod._prepare_agent_startup(_args(tui=False, command="chat"))
     assert calls == ["discover"]
+
+
+def test_no_tools_startup_skips_plugins_mcp_shell_hooks_and_webhooks(monkeypatch):
+    calls = []
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.plugins",
+        types.SimpleNamespace(start_background_plugin_discovery=lambda: calls.append("plugins")),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.mcp_startup",
+        types.SimpleNamespace(
+            set_mcp_server_filter=lambda *_args: calls.append("mcp-filter"),
+            start_background_mcp_discovery=lambda **_kwargs: calls.append("mcp"),
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.config",
+        types.SimpleNamespace(load_config=lambda: {}),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "agent.shell_hooks",
+        types.SimpleNamespace(register_from_config=lambda *_args, **_kwargs: calls.append("shell")),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "agent.outbound_webhooks",
+        types.SimpleNamespace(register_from_config=lambda *_args, **_kwargs: calls.append("webhook")),
+    )
+    monkeypatch.setattr(main_mod, "_is_tui_chat_launch", lambda _args: False)
+
+    main_mod._prepare_agent_startup(_args(command="chat", no_tools=True))
+
+    assert calls == []

@@ -481,16 +481,18 @@ class CLIAgentSetupMixin:
 
         # Join the background preloaded-skills load (--skills/-s) BEFORE the agent
         # snapshots self.system_prompt below. No-op when nothing was requested.
-        self.finalize_preloaded_skills()
-        _prepare_deferred_agent_startup()
-        self._install_tool_callbacks()
-        self._ensure_tirith_security()
+        if not getattr(self, "no_tools", False):
+            self.finalize_preloaded_skills()
+            _prepare_deferred_agent_startup()
+            self._install_tool_callbacks()
+            self._ensure_tirith_security()
         if not self._ensure_runtime_credentials():
             return False
         from hermes_cli.mcp_startup import ensure_mcp_discovery_before_agent_build
-        ensure_mcp_discovery_before_agent_build(
-            logger=logger, single_query=getattr(self, "_single_query_mode", False))
-        if self._session_db is None:
+        if not getattr(self, "no_tools", False):
+            ensure_mcp_discovery_before_agent_build(
+                logger=logger, single_query=getattr(self, "_single_query_mode", False))
+        if self._session_db is None and not getattr(self, "no_session_persistence", False):
             try:
                 from hermes_state import SessionDB
                 self._session_db = SessionDB()
@@ -519,6 +521,7 @@ class CLIAgentSetupMixin:
                 max_tokens=self.max_tokens, max_iterations=self.max_turns,
                 run_budget_seconds=getattr(self, "run_budget_seconds", None),
                 enabled_toolsets=self.enabled_toolsets, disabled_toolsets=self.disabled_toolsets,
+                no_tools=getattr(self, "no_tools", False),
                 verbose_logging=self.verbose, quiet_mode=not self.verbose,
                 tool_progress_mode=getattr(self, "tool_progress_mode", "all"),
                 ephemeral_system_prompt=self.system_prompt if self.system_prompt else None,
@@ -533,13 +536,18 @@ class CLIAgentSetupMixin:
                 session_id=self.session_id, platform="cli", session_db=self._session_db,
                 clarify_callback=clarify_callback,
                 reasoning_callback=self._current_reasoning_callback(),
-                fallback_model=self._fallback_model, thinking_callback=self._on_thinking,
+                fallback_model=None if getattr(self, "no_fallbacks", False) else self._fallback_model,
+                thinking_callback=self._on_thinking,
                 checkpoints_enabled=self.checkpoints_enabled,
                 checkpoint_max_snapshots=self.checkpoint_max_snapshots,
                 checkpoint_max_total_size_mb=self.checkpoint_max_total_size_mb,
                 checkpoint_max_file_size_mb=self.checkpoint_max_file_size_mb,
-                pass_session_id=self.pass_session_id, skip_context_files=self.ignore_rules,
-                skip_memory=self.ignore_rules, tool_progress_callback=self._on_tool_progress,
+                pass_session_id=self.pass_session_id,
+                skip_context_files=self.ignore_rules or getattr(self, "no_context_files", False),
+                skip_memory=self.ignore_rules or getattr(self, "no_memory", False),
+                skip_background_review=getattr(self, "no_background_review", False),
+                disable_session_persistence=getattr(self, "no_session_persistence", False),
+                tool_progress_callback=self._on_tool_progress,
                 tool_start_callback=self._on_tool_start if self._inline_diffs_enabled else None,
                 tool_complete_callback=self._on_tool_complete if self._inline_diffs_enabled else None,
                 stream_delta_callback=self._stream_delta if self.streaming_enabled else None,

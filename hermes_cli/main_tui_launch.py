@@ -714,7 +714,10 @@ def _launch_tui(
     provider: Optional[str] = None, toolsets: object = None, skills: object = None,
     verbose: Optional[bool] = None, quiet: bool = False, query: Optional[str] = None,
     image: Optional[str] = None, worktree: bool = False, checkpoints: bool = False,
-    pass_session_id: bool = False, max_turns: Optional[int] = None, accept_hooks: bool = False):
+    pass_session_id: bool = False, max_turns: Optional[int] = None, accept_hooks: bool = False,
+    no_tools: bool = False, no_context_files: bool = False, no_memory: bool = False,
+    no_background_review: bool = False, no_fallbacks: bool = False,
+    no_session_persistence: bool = False):
     """Replace current process with the TUI."""
     from hermes_cli.main import PROJECT_ROOT
     tui_dir = PROJECT_ROOT / "ui-tui"
@@ -757,6 +760,12 @@ def _launch_tui(
         ("HERMES_TUI_PASS_SESSION_ID", "1" if pass_session_id else None),
         ("HERMES_TUI_MAX_TURNS", str(max_turns) if max_turns is not None else None),
         ("HERMES_TUI_TOOL_PROGRESS", "verbose" if verbose else "off" if quiet else None),
+        ("HERMES_TUI_NO_TOOLS", "1" if no_tools else None),
+        ("HERMES_TUI_NO_CONTEXT_FILES", "1" if no_context_files else None),
+        ("HERMES_TUI_NO_MEMORY", "1" if no_memory else None),
+        ("HERMES_TUI_NO_BACKGROUND_REVIEW", "1" if no_background_review else None),
+        ("HERMES_TUI_NO_FALLBACKS", "1" if no_fallbacks else None),
+        ("HERMES_TUI_NO_SESSION_PERSISTENCE", "1" if no_session_persistence else None),
         ("HERMES_ACCEPT_HOOKS", "1" if accept_hooks else None)):
         if value:
             env[key] = value

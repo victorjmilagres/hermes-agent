@@ -1292,3 +1292,9 @@ class TestLightpandaPostSetup:
         # Not in the forced-setup gate: a missing binary must not nag every
         # user who toggles the browser toolset.
         assert "lightpanda" not in _POST_SETUP_INSTALLED
+
+
+def test_explicit_empty_platform_toolsets_remain_empty():
+    from hermes_cli.tools_config import _get_platform_tools
+
+    assert _get_platform_tools({"platform_toolsets": {"cli": []}}, "cli") == set()

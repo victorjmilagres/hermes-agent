@@ -255,8 +255,11 @@ def _background_agent_kwargs(agent, task_id: str) -> dict:
     def g(name, default=None):
         return getattr(agent, name, default)
 
+    no_tools = bool(g("no_tools", False))
     # Don't rehydrate a deliberately empty fallback chain.
-    if hasattr(agent, "_fallback_chain"):
+    if no_tools:
+        fallback = []
+    elif hasattr(agent, "_fallback_chain"):
         fallback = agent._fallback_chain or []
     else:
         fallback = (agent._fallback_model if hasattr(agent, "_fallback_model")
@@ -269,13 +272,23 @@ def _background_agent_kwargs(agent, task_id: str) -> dict:
         **{k: g(k) for k in ("providers_allowed", "providers_ignored", "providers_order", "provider_sort",
                              "provider_data_collection", "openrouter_min_coding_score")},
         "model": g("model") or _resolve_model(), "max_iterations": _cfg_max_turns(cfg, 25),
-        "enabled_toolsets": g("enabled_toolsets") or _load_enabled_toolsets("tui"),
+        "enabled_toolsets": (
+            g("enabled_toolsets")
+            if hasattr(agent, "enabled_toolsets")
+            else _load_enabled_toolsets("tui")
+        ),
+        "no_tools": no_tools,
         "quiet_mode": True, "verbose_logging": False,
         "provider_require_parameters": g("provider_require_parameters", False), "session_id": task_id,
         "reasoning_config": g("reasoning_config") or _load_reasoning_config(str(g("model", "") or "")),
         "service_tier": g("service_tier") or _load_service_tier(),
         "request_overrides": dict(g("request_overrides", {}) or {}),
-        "platform": "tui", "session_db": _get_db(), "fallback_model": fallback}
+        "platform": "tui", "session_db": None if no_tools else _get_db(),
+        "disable_session_persistence": no_tools,
+        "skip_context_files": no_tools,
+        "skip_memory": no_tools,
+        "skip_background_review": no_tools,
+        "fallback_model": fallback}
 
 
 def _ephemeral_preview_agent_kwargs(agent, task_id: str) -> dict:

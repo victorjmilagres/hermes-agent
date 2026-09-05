@@ -51,6 +51,23 @@ def _coerce_content_text(raw: Any) -> str:
     return str(raw)
 
 
+def reject_no_tools_response(
+    agent: Any, assistant_message: Any, messages: Any, *, api_call_count: int,
+) -> Optional[Dict[str, Any]]:
+    """Return a terminal failure when a zero-tools model emits tool calls."""
+    if not getattr(agent, "no_tools", False) or not getattr(assistant_message, "tool_calls", None):
+        return None
+    error = "Zero-tools invariant violated: model emitted a tool call"
+    return {
+        "final_response": "",
+        "messages": messages,
+        "completed": False,
+        "api_calls": api_call_count,
+        "error": error,
+        "failed": True,
+    }
+
+
 def _fire_post_api_request_hook(
     agent: Any, response: Any, assistant_message: Any, finish_reason: Any, *, api_messages: Any,
     api_call_count: Any, api_duration: Any, api_start_time: Any, api_request_id: Any,
@@ -131,15 +148,22 @@ def normalize_model_response(
     if assistant_message.content is not None and not isinstance(assistant_message.content, str):
         assistant_message.content = _coerce_content_text(assistant_message.content)
 
+    no_tools_failure = reject_no_tools_response(
+        agent, assistant_message, messages, api_call_count=api_call_count,
+    )
+    if no_tools_failure is not None:
+        return _verdict("return", no_tools_failure)
+
     # Agent-as-provider projection: splice the provider-agent's own tool work in as
     # call/result rows before this turn's assistant message; no-op for ordinary providers.
     splice_provider_projection(agent, response, messages)
 
-    _fire_post_api_request_hook(
-        agent, response, assistant_message, finish_reason, api_messages=api_messages,
-        api_call_count=api_call_count, api_duration=api_duration, api_start_time=api_start_time,
-        api_request_id=api_request_id, effective_task_id=effective_task_id, turn_id=turn_id,
-    )
+    if not getattr(agent, "no_tools", False):
+        _fire_post_api_request_hook(
+            agent, response, assistant_message, finish_reason, api_messages=api_messages,
+            api_call_count=api_call_count, api_duration=api_duration, api_start_time=api_start_time,
+            api_request_id=api_request_id, effective_task_id=effective_task_id, turn_id=turn_id,
+        )
 
     content = assistant_message.content
     if content and not agent.quiet_mode:

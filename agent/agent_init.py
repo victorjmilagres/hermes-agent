@@ -649,9 +649,11 @@ def _init_turn_state(agent, run_budget_seconds):
     agent._credits_latch = new_credits_latch()  # threshold-notice latch (sticky keys + gates)
 
 
-def _setup_logging(agent):
+def _setup_logging(agent, *, no_tools: bool = False):
     # agent.log (INFO+) + errors.log (WARNING+); idempotent so per-message gateway agents
     # don't duplicate handlers.
+    if no_tools:
+        return
     from hermes_logging import setup_logging, setup_verbose_logging
     setup_logging(hermes_home=_ra()._hermes_home)
 
@@ -1029,26 +1031,40 @@ def _init_fallback_chain(agent, fallback_model):
             print(f"🔄 Fallback chain ({len(chain)} providers): " + " → ".join(labels))
 
 
-def _load_tools(agent, enabled_toolsets, disabled_toolsets):
-    # A multiplexed gateway may have switched HERMES_HOME since model_tools was imported;
-    # make sure this profile's plugins are discovered before the tool snapshot.
-    try:
-        from hermes_cli.plugins import discover_plugins
-        discover_plugins()
-    except Exception:
-        logger.warning("Plugin discovery failed during agent setup", exc_info=True)
+def _load_tools(
+    agent, enabled_toolsets, disabled_toolsets, *, no_tools: bool = False,
+    disable_session_persistence: bool = False,
+):
+    agent.no_tools = bool(no_tools)
+    if agent.no_tools:
+        if enabled_toolsets:
+            raise ValueError("no_tools cannot be combined with enabled_toolsets")
+        agent.tools = []
+        agent.valid_tool_names = set()
+        agent._kanban_worker_guidance = ""
+        agent._skip_mcp_refresh = True
+        return
+    from agent.persistence_context import without_session_persistence
+    with without_session_persistence(disable_session_persistence):
+        # A multiplexed gateway may have switched HERMES_HOME since model_tools was imported;
+        # make sure this profile's plugins are discovered before the tool snapshot.
+        try:
+            from hermes_cli.plugins import discover_plugins
+            discover_plugins()
+        except Exception:
+            logger.warning("Plugin discovery failed during agent setup", exc_info=True)
 
-    # Capture the registry generation FIRST so a concurrent refresh can detect staleness.
-    try:
-        from tools.registry import registry as _snapshot_registry
-        agent._tool_snapshot_generation = _snapshot_registry._generation
-    except Exception:
-        agent._tool_snapshot_generation = 0
-    import model_tools
-    agent.tools = model_tools.get_tool_definitions(
-        enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets,
-        quiet_mode=agent.quiet_mode,
-    )
+        # Capture the registry generation FIRST so a concurrent refresh can detect staleness.
+        try:
+            from tools.registry import registry as _snapshot_registry
+            agent._tool_snapshot_generation = _snapshot_registry._generation
+        except Exception:
+            agent._tool_snapshot_generation = 0
+        import model_tools
+        agent.tools = model_tools.get_tool_definitions(
+            enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets,
+            quiet_mode=agent.quiet_mode,
+        )
 
     agent.valid_tool_names = {tool["function"]["name"] for tool in agent.tools} if agent.tools else set()
     # Kanban guidance is session-static (kanban_show iff HERMES_KANBAN_TASK); resolve once.
@@ -1105,33 +1121,65 @@ def _publish_session_id(session_id: str) -> None:
             os.environ["HERMES_SESSION_ID"] = session_id
 
 
+class _NoToolsCheckpointManager:
+    enabled = False
+
+    def new_turn(self) -> None:
+        return None
+
+
+class _NoToolsTodoStore:
+    def has_items(self) -> bool:
+        return False
+
+    def snapshot(self) -> dict:
+        return {"revision": 0, "items": []}
+
+    def restore(self, *_args, **_kwargs) -> None:
+        return None
+
+    def read(self) -> list:
+        return []
+
+    def format_for_injection(self) -> str:
+        return ""
+
+
 def _init_session_state(agent, session_id, session_db, parent_session_id, reasoning_config, max_tokens,
-    checkpoints_enabled, checkpoint_max_snapshots, checkpoint_max_total_size_mb, checkpoint_max_file_size_mb):
+    checkpoints_enabled, checkpoint_max_snapshots, checkpoint_max_total_size_mb, checkpoint_max_file_size_mb,
+    *, no_tools: bool = False, disable_session_persistence: bool = False):
     agent.session_start = datetime.now()
     agent.session_id = session_id or (
         f"{agent.session_start.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     )
-    _publish_session_id(agent.session_id)
+    if not disable_session_persistence:
+        _publish_session_id(agent.session_id)
 
     # ~/.hermes/sessions/ — kept unconditionally for request_dump_*.json debug breadcrumbs.
     agent.logs_dir = get_hermes_home() / "sessions"
-    agent.logs_dir.mkdir(parents=True, exist_ok=True)
+    if not disable_session_persistence:
+        agent.logs_dir.mkdir(parents=True, exist_ok=True)
     # Per-session JSON snapshot is opt-in (sessions.write_json_snapshots); state.db is canonical.
     agent._session_json_enabled = False
-    with suppress(Exception):
-        from hermes_cli.config import load_config_readonly as _load_sess_cfg
-        _sess_cfg = (_load_sess_cfg().get("sessions") or {})
-        agent._session_json_enabled = bool(_sess_cfg.get("write_json_snapshots", False))
+    if not disable_session_persistence:
+        with suppress(Exception):
+            from hermes_cli.config import load_config_readonly as _load_sess_cfg
+            _sess_cfg = (_load_sess_cfg().get("sessions") or {})
+            agent._session_json_enabled = bool(_sess_cfg.get("write_json_snapshots", False))
 
     _set_defaults(agent, _SESSION_STATE)
+    agent._persist_disabled = bool(disable_session_persistence)
 
     # Filesystem checkpoint manager (transparent — not a tool)
-    from tools.checkpoint_manager import CheckpointManager
-    agent._checkpoint_mgr = CheckpointManager(
-        enabled=checkpoints_enabled, max_snapshots=checkpoint_max_snapshots,
-        max_total_size_mb=checkpoint_max_total_size_mb,
-        max_file_size_mb=checkpoint_max_file_size_mb,
-    )
+    if no_tools or disable_session_persistence:
+        agent._checkpoint_mgr = _NoToolsCheckpointManager()
+    else:
+        from tools.checkpoint_manager import CheckpointManager
+        agent._checkpoint_mgr = CheckpointManager(
+            enabled=checkpoints_enabled, max_snapshots=checkpoint_max_snapshots,
+            max_total_size_mb=checkpoint_max_total_size_mb,
+            max_file_size_mb=checkpoint_max_file_size_mb,
+        )
 
     agent._session_db = session_db  # optional SQLite store (CLI/gateway-provided)
     agent._parent_session_id = parent_session_id
@@ -1148,8 +1196,11 @@ def _init_session_state(agent, session_id, session_db, parent_session_id, reason
             agent._session_init_model_config["yolo_mode"] = True
 
     # In-memory todo list for task planning (one per agent/session)
-    from tools.todo_tool import TodoStore
-    agent._todo_store = TodoStore()
+    if no_tools:
+        agent._todo_store = _NoToolsTodoStore()
+    else:
+        from tools.todo_tool import TodoStore
+        agent._todo_store = TodoStore()
 
 
 def _apply_display_config(agent, _agent_cfg, platform):
@@ -1229,6 +1280,9 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
     agent._memory_nudge_interval = 10
     agent._turns_since_memory = 0
     agent._iters_since_skill = 0
+    agent._memory_manager = None
+    if getattr(agent, "no_tools", False):
+        return
     # skip_memory skips the external *provider*; enabled_toolsets=["memory"] still gets the
     # built-in store so the memory tool never sees store=None.
     # Flush/background agents can still pass enabled_toolsets=["memory"] so the built-in file store exists
@@ -1261,7 +1315,6 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
                 agent._memory_store.load_from_disk()
 
     # External memory provider plugin (one at a time, alongside built-in): memory.provider.
-    agent._memory_manager = None
     if not skip_memory:
         try:
             _mem_provider_name = mem_config.get("provider", "") if mem_config else ""
@@ -1327,7 +1380,7 @@ def _apply_agent_section(agent, _agent_cfg):
     ):
         setattr(agent, f"_{_key}", bool(_agent_section.get(_key, True)))
     # Warm the probe (~0.5s of subprocesses) off-thread so the first prompt build finds it cached.
-    if agent._environment_probe:
+    if agent._environment_probe and not getattr(agent, "no_tools", False):
         with suppress(Exception):
             from tools.env_probe import warm_environment_probe_async
             warm_environment_probe_async()
@@ -1809,7 +1862,7 @@ def _compressor_max_tokens(agent):
 
 
 def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_context_length, session_db):
-    _selected_engine = _select_context_engine(_agent_cfg)
+    _selected_engine = None if getattr(agent, "no_tools", False) else _select_context_engine(_agent_cfg)
     if _selected_engine is not None:
         agent.context_compressor = _selected_engine
         # External engines own compaction policy — the host threshold (and its Codex
@@ -2204,6 +2257,7 @@ def init_agent(
     checkpoint_max_snapshots: int = 20, checkpoint_max_total_size_mb: int = 500,
     checkpoint_max_file_size_mb: int = 10, pass_session_id: bool = False,
     requested_provider: str = None, capabilities: Optional[Dict[str, bool]] = None,
+    no_tools: bool = False, disable_session_persistence: bool = False,
 ):
     """Initialize the AI Agent (body of :meth:`AIAgent.__init__`).
 
@@ -2219,6 +2273,25 @@ def init_agent(
         load_soul_identity keeps ~/.hermes/SOUL.md as identity regardless.
     """
     _install_safe_stdio()
+
+    # ``no_tools`` is the public fail-closed isolation posture, not merely an
+    # empty schema list.  Collapse every implicit capability before any client,
+    # persistence, context, memory, fallback, or checkpoint initializer runs.
+    if no_tools:
+        disable_session_persistence = True
+        skip_context_files = True
+        load_soul_identity = False
+        skip_memory = True
+        skip_background_review = True
+        fallback_model = None
+        session_db = None
+        checkpoints_enabled = False
+    elif disable_session_persistence:
+        session_db = None
+        checkpoints_enabled = False
+
+    if not no_tools:
+        _ra()._ensure_runtime_env_loaded()
 
     _params = locals()
     for _name in _PASSTHROUGH_PARAMS:
@@ -2252,6 +2325,14 @@ def init_agent(
     agent.acp_command = acp_command or command
     agent.acp_args = list(acp_args or args or [])
     _resolve_api_mode(agent, api_mode, provider_name, base_url)
+    if no_tools and (
+        agent.api_mode == "codex_app_server"
+        or agent.provider == "copilot-acp"
+        or str(agent.base_url or "").lower().startswith(("acp://", "acp+tcp://"))
+    ):
+        raise ValueError(
+            f"no_tools is not supported for provider-native implicit-tool mode {agent.api_mode!r}"
+        )
     _finalize_routing(agent, api_mode, credential_pool)
 
     # Platform callbacks are stored under their parameter names verbatim.
@@ -2269,14 +2350,19 @@ def init_agent(
 
     _init_prompt_cache_config(agent)
     _init_turn_state(agent, run_budget_seconds)
-    _setup_logging(agent)
+    _setup_logging(agent, no_tools=no_tools)
     _set_defaults(agent, _STREAM_STATE)
     _build_client(agent, api_key, base_url, fallback_model)
     _init_fallback_chain(agent, fallback_model)
-    _load_tools(agent, enabled_toolsets, disabled_toolsets)
+    _load_tools(
+        agent, enabled_toolsets, disabled_toolsets, no_tools=no_tools,
+        disable_session_persistence=disable_session_persistence,
+    )
     _init_session_state(
         agent, session_id, session_db, parent_session_id, reasoning_config, max_tokens,
         checkpoints_enabled, checkpoint_max_snapshots, checkpoint_max_total_size_mb, checkpoint_max_file_size_mb,
+        no_tools=no_tools,
+        disable_session_persistence=disable_session_persistence,
     )
 
     # Load config once for memory, skills, and compression sections
@@ -2296,7 +2382,8 @@ def init_agent(
     _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_context_length, session_db)
     _enforce_minimum_context(agent)
     _warn_nonagentic_hermes_model(agent)
-    _inject_context_engine_tools(agent)
+    if not agent.no_tools:
+        _inject_context_engine_tools(agent)
     _init_usage_state(agent)
     _configure_ollama_num_ctx(agent, _model_cfg, _config_context_length)
     _emit_compression_summary(agent, cs)

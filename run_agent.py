@@ -92,14 +92,33 @@ from hermes_cli.env_loader import load_hermes_dotenv
 from hermes_cli.timeouts import get_provider_request_timeout, get_provider_stale_timeout
 
 _hermes_home = get_hermes_home()  # read by agent_init via _ra()._hermes_home
-_loaded_env_paths = load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).parent / '.env')
-for _env_path in _loaded_env_paths:
-    logger.info("Loaded environment variables from %s", _env_path)
-if not _loaded_env_paths:
-    logger.info("No .env file found. Using system environment variables.")
+_runtime_env_loaded = False
 
 
-from model_tools import get_toolset_for_tool
+def _ensure_runtime_env_loaded() -> None:
+    """Load profile/project dotenv lazily when a capability-bearing agent is constructed."""
+    global _runtime_env_loaded
+    if _runtime_env_loaded:
+        return
+    loaded = load_hermes_dotenv(
+        hermes_home=_hermes_home, project_env=Path(__file__).parent / ".env"
+    )
+    _runtime_env_loaded = True
+    for env_path in loaded:
+        logger.info("Loaded environment variables from %s", env_path)
+    if not loaded:
+        logger.info("No .env file found. Using system environment variables.")
+
+
+
+
+def get_toolset_for_tool(tool_name):
+    """Lazy listing helper so importing AIAgent never discovers model tools."""
+    from model_tools import get_toolset_for_tool as _get_toolset_for_tool
+
+    return _get_toolset_for_tool(tool_name)
+
+
 from tools.terminal_tool_lifecycle import cleanup_vm, get_active_env
 from tools.interrupt import set_interrupt as _set_interrupt
 from tools.browser_tool_lifecycle import cleanup_browser
@@ -270,6 +289,8 @@ class AIAgent(
         checkpoint_max_total_size_mb: int = 500, checkpoint_max_file_size_mb: int = 10,
         pass_session_id: bool = False, requested_provider: str = None,
         capabilities: Dict[str, bool] | None = None,
+        no_tools: bool = False,
+        disable_session_persistence: bool = False,
     ):
         """Forwarder — see ``agent.agent_init.init_agent`` (same keyword parameters, minus ``tool_delay``)."""
         init_kwargs = {k: v for k, v in locals().items() if k not in ("self", "tool_delay")}
@@ -277,7 +298,9 @@ class AIAgent(
             warnings.warn("tool_delay is deprecated and ignored; sequential tool calls "
                           "no longer sleep between executions.", DeprecationWarning, stacklevel=2)
         from agent.agent_init import init_agent
-        init_agent(self, **init_kwargs)
+        from agent.persistence_context import without_session_persistence
+        with without_session_persistence(no_tools or disable_session_persistence):
+            init_agent(self, **init_kwargs)
 
     def _get_session_db_for_recall(self):
         """SessionDB for recall, opening the default state DB when no ``session_db`` was passed so the
