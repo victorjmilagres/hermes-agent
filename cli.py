@@ -2548,11 +2548,19 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         checkpoints: bool = False,
         pass_session_id: bool = False,
         ignore_rules: bool = False,
+        no_tools: bool = False,
+        no_context_files: bool = False,
+        no_memory: bool = False,
+        no_background_review: bool = False,
+        no_fallbacks: bool = False,
+        no_session_persistence: bool = False,
     ):
         """CLI args win over config; ``reasoning`` is per-run only; ``resume`` restores history from SQLite."""
         self._init_display_options(verbose, compact)
         self._init_model_routing(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget,
-                                 checkpoints, pass_session_id, ignore_rules)
+                                 checkpoints, pass_session_id, ignore_rules, no_tools,
+                                 no_context_files, no_memory, no_background_review,
+                                 no_fallbacks, no_session_persistence)
         self._init_runtime_state(resume)
 
     def _init_display_options(self, verbose, compact):
@@ -2623,11 +2631,17 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._last_input_mode_recovery = self._last_termios_drift_check = 0.0
         self._input_mode_recovery_notice_shown = self._termios_drift_notice_shown = False
 
-    def _init_model_routing(self, model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget, checkpoints, pass_session_id, ignore_rules):
+    def _init_model_routing(self, model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget, checkpoints, pass_session_id, ignore_rules, no_tools=False, no_context_files=False, no_memory=False, no_background_review=False, no_fallbacks=False, no_session_persistence=False):
         """Resolve model/provider/base_url, turn limits, toolsets, checkpoints, prompt/personality, reasoning + routing config."""
         self._init_model_and_provider(model, provider, api_key, base_url)
         self._init_turn_limits(max_turns, run_budget)
         self._init_toolsets(toolsets)
+        self.no_tools = bool(no_tools)
+        self.no_context_files = self.no_tools or bool(no_context_files)
+        self.no_memory = self.no_tools or bool(no_memory)
+        self.no_background_review = self.no_tools or bool(no_background_review)
+        self.no_fallbacks = self.no_tools or bool(no_fallbacks)
+        self.no_session_persistence = self.no_tools or bool(no_session_persistence)
         self._init_checkpoints_and_rules(checkpoints, pass_session_id, ignore_rules)
         self._init_prompt_and_reasoning(reasoning)
 
@@ -2817,11 +2831,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._prompt_start_time: Optional[float] = None
         self._prompt_duration: float = 0.0
         self._last_turn_finished_at: Optional[float] = None
-        self._init_session_store()
+        if self.no_session_persistence:
+            self._session_db = None
+            self._session_db_unavailable = False
+        else:
+            self._init_session_store()
         self._pending_title: Optional[str] = None
         self._resumed = bool(resume)
         self.session_id = resume or f"{self.session_start.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-        getattr(self, "_write_terminal_breadcrumb", lambda: None)()
+        if not self.no_session_persistence:
+            getattr(self, "_write_terminal_breadcrumb", lambda: None)()
 
         self._history_file = _hermes_home / ".hermes_history"
         self._last_invalidate: float = 0.0  # throttles UI repaints
@@ -2831,6 +2850,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         """Open the session store early (so /title works before the first message) + opportunistic maintenance."""
         self._session_db = None
         self._session_db_unavailable = False
+        if self.no_session_persistence:
+            return
         try:
             from hermes_state import SessionDB
             self._session_db = SessionDB()
@@ -2952,6 +2973,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
     def _claim_active_session(self, surface: str = "cli", *, stderr: bool = False) -> bool:
         """Claim a global active-session slot for this CLI process."""
+        if self.no_session_persistence:
+            return True
         if self._active_session_lease is not None:
             return True
         try:
@@ -4256,16 +4279,19 @@ def _install_single_query_signal_handlers(cli):
                 _signal.signal(getattr(_signal, _name), _signal_handler_q)
 
 
-def _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget, verbose, compact, resume, checkpoints, pass_session_id, ignore_rules, skills):
+def _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget, verbose, compact, resume, checkpoints, pass_session_id, ignore_rules, skills, no_tools=False, no_context_files=False, no_memory=False, no_background_review=False, no_fallbacks=False, no_session_persistence=False):
     """Resolve the toolset list (explicit / coding posture / platform default), construct HermesCLI, and start the background skills preload."""
+    from hermes_cli.oneshot import _normalize_toolsets, _resolve_zero_tools
+
     toolsets_list = None
-    if isinstance(toolsets, str) and toolsets:
-        toolsets_list = [t.strip() for t in toolsets.split(",")]
-    elif isinstance(toolsets, (list, tuple)) and toolsets:
-        # Fire may pass multiple --toolsets as a tuple
+    no_tools, zero_tools_error = _resolve_zero_tools(no_tools, toolsets, command_label="hermes chat")
+    if zero_tools_error:
+        raise ValueError(zero_tools_error.strip().removeprefix("hermes chat: "))
+    normalized_names = _normalize_toolsets(toolsets)
+    if no_tools:
         toolsets_list = []
-        for t in toolsets:
-            toolsets_list.extend([x.strip() for x in t.split(",")] if isinstance(t, str) else [str(t)])
+    elif normalized_names:
+        toolsets_list = normalized_names
     elif not toolsets:
         # Coding posture inside a code workspace, else the shared platform resolver.
         try:
@@ -4277,7 +4303,7 @@ def _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url
             from hermes_cli.tools_config import _get_platform_tools
             toolsets_list = sorted(_get_platform_tools(CLI_CONFIG, "cli"))
 
-    parsed_skills = _parse_skills_argument(skills)
+    parsed_skills = [] if no_tools else _parse_skills_argument(skills)
 
     try:
         cli = HermesCLI(
@@ -4295,6 +4321,12 @@ def _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url
             checkpoints=checkpoints,
             pass_session_id=pass_session_id,
             ignore_rules=ignore_rules,
+            no_tools=no_tools,
+            no_context_files=no_context_files,
+            no_memory=no_memory,
+            no_background_review=no_background_review,
+            no_fallbacks=no_fallbacks,
+            no_session_persistence=no_session_persistence,
         )
     except ImportError as e:
         # Direct `python cli.py` bypasses cmd_chat's partial-update ImportError handler.
@@ -4332,7 +4364,7 @@ def _run_legacy_gateway():
     asyncio.run(start_gateway())
 
 
-def _start_worktree_setup(list_tools, list_toolsets, worktree, w):
+def _start_worktree_setup(list_tools, list_toolsets, worktree, w, no_tools=False):
     """Start isolated-worktree creation (+ tool prewarm) in the background.
 
     Returns a join callable that publishes ``_active_worktree``/TERMINAL_CWD and
@@ -4343,6 +4375,8 @@ def _start_worktree_setup(list_tools, list_toolsets, worktree, w):
     # Overlap tool discovery with the I/O-bound worktree setup so show_banner() hits a warm
     # cache (~0.4s). Only on the -w path: plain `hermes` has no I/O wait to hide.
     def _prewarm_tools() -> None:
+        if no_tools:
+            return
         try:
             import model_tools as _mt
             _mt.get_tool_definitions(quiet_mode=True)
@@ -4484,6 +4518,12 @@ def main(
     pass_session_id: bool = False,
     ignore_user_config: bool = False,
     ignore_rules: bool = False,
+    no_tools: bool = False,
+    no_context_files: bool = False,
+    no_memory: bool = False,
+    no_background_review: bool = False,
+    no_fallbacks: bool = False,
+    no_session_persistence: bool = False,
 ):
     """
     Hermes Agent CLI - Interactive AI Assistant
@@ -4538,10 +4578,12 @@ def main(
         _run_legacy_gateway()
         return
 
-    _join_worktree = _start_worktree_setup(list_tools, list_toolsets, worktree, w)
+    _join_worktree = _start_worktree_setup(list_tools, list_toolsets, worktree, w, no_tools)
     query = query or q
     cli = _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget,
-                               verbose, compact, resume, checkpoints, pass_session_id, ignore_rules, skills)
+                               verbose, compact, resume, checkpoints, pass_session_id, ignore_rules, skills,
+                               no_tools, no_context_files, no_memory, no_background_review,
+                               no_fallbacks, no_session_persistence)
 
     # Join the background worktree creation before anything consumes TERMINAL_CWD.
     # A requested worktree whose setup failed aborts: never silently run without isolation.

@@ -114,6 +114,9 @@ def _frozen_plugin_prompt_sections(agent: Any) -> tuple:
     A restored ``_cached_system_prompt`` is parsed instead of re-running plugin
     code; a render that raises at a rebuild boundary keeps the previous bytes
     (stashed by ``invalidate_system_prompt``) instead of silently vanishing."""
+    if getattr(agent, "no_tools", False):
+        agent._plugin_system_prompt_sections_snapshot = ()
+        return ()
     if hasattr(agent, "_plugin_system_prompt_sections_snapshot"):
         return agent._plugin_system_prompt_sections_snapshot
     stored_prompt = getattr(agent, "_cached_system_prompt", None)
@@ -488,6 +491,11 @@ def _identity_parts(agent: Any, ctx_len: Optional[int]) -> Tuple[List[str], bool
     """SOUL.md (primary identity; cron keeps the persona while skipping cwd
     instructions, scoped to the agent's OWN home) or the default identity.
     Returns ``(parts, soul_loaded)``."""
+    if getattr(agent, "no_tools", False) and not agent.load_soul_identity:
+        return ([
+            "You are Hermes Agent, built by Nous Research. Respond directly and accurately; "
+            "when required context is unavailable, say so plainly rather than guessing."
+        ], False)
     wants_soul = agent.load_soul_identity or not agent.skip_context_files
     _soul_content = _pb.load_soul_md(ctx_len, home_override=_agent_home(agent)) if wants_soul else None
     return ([_soul_content], True) if _soul_content else ([DEFAULT_AGENT_IDENTITY], False)
@@ -495,6 +503,8 @@ def _identity_parts(agent: Any, ctx_len: Optional[int]) -> Tuple[List[str], bool
 
 def _guidance_parts(agent: Any) -> List[str]:
     """Universal + tool-aware + model-gated guidance blocks, each gated by its config.yaml key."""
+    if getattr(agent, "no_tools", False):
+        return ["No tools are available in this session. Answer using only the conversation context."]
     parts: List[str] = []
     if agent.valid_tool_names:
         parts += [
@@ -600,21 +610,23 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # hermes-agent skill installed, so the variant is chosen after the skills
     # index is built; this slot holds its position.
     _help_guidance_slot = len(stable_parts)
-    stable_parts.append(HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS)
+    if not getattr(agent, "no_tools", False):
+        stable_parts.append(HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS)
     stable_parts.extend(_guidance_parts(agent))
-    skills_prompt = _skills_prompt(agent)
+    skills_prompt = "" if getattr(agent, "no_tools", False) else _skills_prompt(agent)
     # Skill-pointer variant requires BOTH skill_view AND the hermes-agent skill
     # in the rendered index (pure string check — inherits the index's stability).
     if "skill_view" in (agent.valid_tool_names or set()) and "- hermes-agent:" in skills_prompt:
         stable_parts[_help_guidance_slot] = HERMES_AGENT_HELP_GUIDANCE
     stable_parts.extend(_alibaba_identity_part(agent))
-    stable_parts.append(_pb.build_environment_hints())
+    if not getattr(agent, "no_tools", False):
+        stable_parts.append(_pb.build_environment_hints())
     # Coding posture: operating brief stays in the stable prefix; the live
     # git/workspace snapshot sits behind its own cache boundary, and the blocks
     # below it must keep their historical post-snapshot position.
     coding_prefix_parts, coding_workspace_parts, coding_trailing_parts = _coding_parts(agent)
     stable_parts.extend(coding_prefix_parts)
-    post_workspace_parts = _post_workspace_parts(agent)
+    post_workspace_parts = [] if getattr(agent, "no_tools", False) else _post_workspace_parts(agent)
     # ── Context tier (cwd-dependent, may change between sessions) ─
     context_parts: List[str] = []
     (context_parts if coding_workspace_parts else stable_parts).extend(
@@ -630,7 +642,8 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     volatile_parts: List[str] = [skills_prompt, *_memory_parts(agent)]
     # Plugin sections are confined to one coarse anchor in the volatile tail so
     # a resumed process can reconstruct the stable prefix without re-running plugins.
-    volatile_parts.extend(_plugin_section_blocks(_frozen_plugin_prompt_sections(agent), "after_memory"))
+    if not getattr(agent, "no_tools", False):
+        volatile_parts.extend(_plugin_section_blocks(_frozen_plugin_prompt_sections(agent), "after_memory"))
     volatile_parts.append(_timestamp_line(agent))
     return {"stable": _join_tier(stable_parts), "context": _join_tier(context_parts), "volatile": _join_tier(volatile_parts)}
 

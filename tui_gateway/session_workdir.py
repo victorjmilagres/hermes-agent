@@ -147,7 +147,7 @@ def _reconcile_session_cwd_from_terminal(session: dict | None) -> bool:
     never overridden. Local backends only (a remote cwd cannot be stat'ed or git-probed here)."""
     # An explicit choice only moves by another explicit action; a cwd adopted HERE is marked `cwd_from_settle` so
     # successive settles keep following.
-    if not session or not _is_local_terminal_backend():
+    if _gateway_stateless() or not session or not _is_local_terminal_backend():
         return False
     if session.get("explicit_cwd") and not session.get("cwd_from_settle"):
         return False
@@ -193,7 +193,7 @@ def _session_source(session: dict | None) -> str:
 
 
 def _register_session_cwd(session: dict | None) -> None:
-    if not session:
+    if _gateway_stateless() or not session:
         return
     with contextlib.suppress(Exception):
         from tools.terminal_tool import register_task_env_overrides
@@ -250,6 +250,8 @@ def _ensure_session_db_row(session: dict) -> bool:
 
     See #98924.
     """
+    if _gateway_stateless():
+        return True
     if not (key := session.get("session_key")):
         return
     # Persist into the session's own profile db (global remote mode), not the launch profile's — otherwise the unified
@@ -338,6 +340,9 @@ _WORKDIR_DB_OPEN_FAILED = object()
 @contextlib.contextmanager
 def _workdir_owner_db(session: dict, fail_log: str):
     """Body of :func:`_session_db`; ``_ensure_session_db_row`` uses it directly so a patched ``_session_db`` can't alter rows."""
+    if _gateway_stateless():
+        yield None
+        return
     db, close_db = None, False
     if profile_home := session.get("profile_home"):
         try:

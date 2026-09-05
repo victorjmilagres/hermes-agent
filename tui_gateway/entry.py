@@ -226,6 +226,8 @@ def ensure_mcp_discovery_started() -> None:
     #67605.
     """
     global _mcp_discovery_enabled
+    if os.environ.get("HERMES_TUI_NO_TOOLS", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return
     if not _has_configured_mcp_servers():
         return
     _mcp_discovery_enabled = True
@@ -243,13 +245,14 @@ def main():
 
     # The heartbeat row lets the orphan sweep tell "live but idle" from "truly orphaned",
     # so it must start BEFORE the sweep.
-    for start, what in (
-            (server._start_backend_heartbeat_refresher, "backend heartbeat refresher start"),
-            (server._schedule_startup_orphan_sweep, "startup orphan sweep scheduling")):
-        try:
-            start()
-        except Exception:
-            logger.warning("%s failed", what, exc_info=True)
+    if not server._gateway_stateless():
+        for start, what in (
+                (server._start_backend_heartbeat_refresher, "backend heartbeat refresher start"),
+                (server._schedule_startup_orphan_sweep, "startup orphan sweep scheduling")):
+            try:
+                start()
+            except Exception:
+                logger.warning("%s failed", what, exc_info=True)
 
     # Backgrounded so a dead MCP server can't freeze startup; _make_agent briefly joins it.
     ensure_mcp_discovery_started()

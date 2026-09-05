@@ -135,6 +135,18 @@ def _add_top_level_flags(parser: argparse.ArgumentParser) -> None:
         "(or per-model under agent.reasoning_overrides)."))
     add("-t", "--toolsets", default=None,
         help="Comma-separated toolsets to enable for this invocation. Applies to -z/--oneshot and --tui.")
+    inherited(parser, "--no-tools", action="store_true", default=False,
+              help="Expose no tools and enforce a zero-tool provider boundary.")
+    inherited(parser, "--no-context-files", action="store_true", default=False,
+              help="Skip project context files for this invocation.")
+    inherited(parser, "--no-memory", action="store_true", default=False,
+              help="Disable memory loading and storage for this invocation.")
+    inherited(parser, "--no-background-review", action="store_true", default=False,
+              help="Disable automatic background review for this invocation.")
+    inherited(parser, "--no-fallbacks", action="store_true", default=False,
+              help="Disable fallback providers for this invocation.")
+    inherited(parser, "--no-session-persistence", action="store_true", default=False,
+              help="Do not create or persist a session for this invocation.")
     add("--resume", "-r", metavar="SESSION", default=None, help=(
         "Resume a previous session by ID or title, or pass 'latest' for "
         "the most recent session (workspace-scoped, like -c with no name)"))
@@ -209,6 +221,18 @@ def _build_chat_parser(subparsers) -> argparse.ArgumentParser:
     inherited(chat_parser, "-m", "--model", default=SUPPRESS,
               help="Model to use (e.g., anthropic/claude-sonnet-4)")
     add("-t", "--toolsets", default=SUPPRESS, help="Comma-separated toolsets to enable")
+    inherited(chat_parser, "--no-tools", action="store_true", default=SUPPRESS,
+              help="Expose no tools and enforce a zero-tool provider boundary.")
+    inherited(chat_parser, "--no-context-files", action="store_true", default=SUPPRESS,
+              help="Skip project context files for this invocation.")
+    inherited(chat_parser, "--no-memory", action="store_true", default=SUPPRESS,
+              help="Disable memory loading and storage for this invocation.")
+    inherited(chat_parser, "--no-background-review", action="store_true", default=SUPPRESS,
+              help="Disable automatic background review for this invocation.")
+    inherited(chat_parser, "--no-fallbacks", action="store_true", default=SUPPRESS,
+              help="Disable fallback providers for this invocation.")
+    inherited(chat_parser, "--no-session-persistence", action="store_true", default=SUPPRESS,
+              help="Do not create or persist a session for this invocation.")
     inherited(chat_parser, "--reasoning", default=SUPPRESS, metavar="LEVEL", help=(
         "Reasoning effort for this session: none, minimal, low, medium, "
         "high, xhigh, max, or ultra. Overrides agent.reasoning_effort for "

@@ -38,8 +38,20 @@ from tui_gateway.transport import (StdioTransport, Transport, bind_transport, cu
 
 logger = logging.getLogger(__name__)
 
+
+def _gateway_stateless() -> bool:
+    """Whether this gateway process must avoid all durable/session capability state."""
+    return (
+        is_truthy_value(os.environ.get("HERMES_TUI_NO_TOOLS"))
+        or is_truthy_value(os.environ.get("HERMES_TUI_NO_SESSION_PERSISTENCE"))
+    )
+
 _hermes_home = get_hermes_home()
-load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).parent.parent / ".env")
+load_hermes_dotenv(
+    hermes_home=_hermes_home,
+    project_env=Path(__file__).parent.parent / ".env",
+    reapply_terminal_config=not _gateway_stateless(),
+)
 
 
 # ── Panic logger: crashes otherwise leave no forensics (stdout is the JSON-RPC pipe, stderr doesn't
@@ -51,11 +63,12 @@ def _record_crash(kind: str, exc_type, exc_value, exc_tb, *, thread_name: str | 
     import traceback
     trace = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
     suffix = f" · thread={thread_name}" if thread_name is not None else ""
-    with contextlib.suppress(Exception):
-        os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
-        with open(_CRASH_LOG, "a", encoding="utf-8") as f:
-            f.write(f"\n=== {kind} · {time.strftime('%Y-%m-%d %H:%M:%S')}{suffix} ===\n")
-            f.write(trace)
+    if not _gateway_stateless():
+        with contextlib.suppress(Exception):
+            os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
+            with open(_CRASH_LOG, "a", encoding="utf-8") as f:
+                f.write(f"\n=== {kind} · {time.strftime('%Y-%m-%d %H:%M:%S')}{suffix} ===\n")
+                f.write(trace)
     # The first line is what the user sees (gateway.stderr Activity line); the rest stays in the log.
     first = str(exc_value).strip().splitlines()[0] if str(exc_value).strip() else exc_type.__name__
     who = f"thread {thread_name} raised " if thread_name is not None else ""
@@ -71,10 +84,11 @@ sys.excepthook = _panic_hook
 threading.excepthook = lambda args: _record_crash(
     "thread exception", args.exc_type, args.exc_value, args.exc_traceback, thread_name=args.thread.name)
 
-with contextlib.suppress(Exception):
-    from hermes_cli.banner import prefetch_update_check
+if not _gateway_stateless():
+    with contextlib.suppress(Exception):
+        from hermes_cli.banner import prefetch_update_check
 
-    prefetch_update_check()
+        prefetch_update_check()
 
 from tui_gateway.render import make_stream_renderer, render_diff, render_message  # noqa: F401
 
@@ -104,6 +118,8 @@ _SLASH_WORKER_TIMEOUT_S = max(5.0, env_float("HERMES_TUI_SLASH_TIMEOUT_S", 45.0)
 
 def _ws_orphan_setting(env_var: str, cfg_key: str, default: float) -> float:
     """``dashboard.<cfg_key>`` seconds; the env var is an internal override that wins when set."""
+    if _gateway_stateless():
+        return 0.0
     raw = os.environ.get(env_var)
     if raw is None or not str(raw).strip():
         raw = None
@@ -373,6 +389,8 @@ _start_idle_reaper()
 
 def _get_db():
     global _db, _db_error
+    if _gateway_stateless():
+        return None
     if _db is None:
         from hermes_state_registry import acquire
         try:
@@ -409,6 +427,8 @@ def _open_profile_session_db(profile_home):
     """Open a DEDICATED handle on ``profile_home``'s ``state.db`` — FAIL CLOSED: a silent fallback to the
     launch ``state.db`` would bleed rows into the wrong profile's store exactly when the profile store is
     briefly unopenable (locked, mid-restore); callers let the error abort the build (→ ``agent_error``)."""
+    if _gateway_stateless():
+        return None
     from hermes_state_registry import acquire
     db_path = Path(profile_home) / "state.db"
     try:
@@ -421,6 +441,9 @@ def _open_profile_session_db(profile_home):
 def _profile_db(params: dict | None = None):
     """Yield the SessionDB for ``params['profile']`` (None when unavailable); closes dedicated
     profile handles, leaves the launch-profile shared handle open."""
+    if _gateway_stateless():
+        yield None
+        return
     profile = (params.get("profile") or "").strip() or None if isinstance(params, dict) else None
     # Launch/own profile → the shared _get_db() handle (left open); another profile → a dedicated
     # handle closed below (app-global remote mode). db is None when unavailable.
@@ -914,6 +937,8 @@ def _wire_session_agent(sid: str, key: str, agent) -> bool:
 
 def _start_session_services(sid: str, key: str, current: dict) -> None:
     """Start the notification poller and fire the session-reset boundary hook."""
+    if _gateway_stateless():
+        return
     with _sessions_lock:
         if (rec := _sessions.get(sid)) is not None:
             rec["_notif_stop"] = _start_notification_poller(sid, rec)
@@ -1003,9 +1028,13 @@ def _start_agent_build(sid: str, session: dict) -> None:
             ready.set()
             return
         notify_registered, scopes, session_db = False, None, None
+        stateless = (
+            is_truthy_value(os.environ.get("HERMES_TUI_NO_TOOLS"))
+            or is_truthy_value(os.environ.get("HERMES_TUI_NO_SESSION_PERSISTENCE"))
+        )
         profile_home = current.get("profile_home")
         try:
-            if not _await_resume_history(sid, current):
+            if not stateless and not _await_resume_history(sid, current):
                 return
             tokens = _set_session_context(key)
             # Global-remote: bind the session profile's HERMES_HOME and hand the agent that profile's db —
@@ -1013,7 +1042,8 @@ def _start_agent_build(sid: str, session: dict) -> None:
             # binding the launch DB and bleeding rows into the wrong state.db.
             if profile_home:
                 scopes = _bind_build_profile_scopes(profile_home)
-                session_db = _open_profile_session_db(profile_home)
+                if not stateless:
+                    session_db = _open_profile_session_db(profile_home)
             try:
                 from tui_gateway.entry import ensure_mcp_discovery_started
                 ensure_mcp_discovery_started()
@@ -1540,6 +1570,8 @@ def _runtime_model_config(agent, existing: dict | None = None) -> dict:
 
 def _persist_live_session_runtime(session: dict | None) -> None:
     """Persist active session runtime so future resumes restore the same footer."""
+    if _gateway_stateless():
+        return
     live = _live_session_agent_db(session)
     if live is None:
         return
@@ -1571,6 +1603,8 @@ def _live_session_agent_db(session: dict | None):
 
 def _persist_live_session_system_prompt(session: dict | None) -> None:
     """Refresh the stored system prompt after a live runtime identity change."""
+    if _gateway_stateless():
+        return
     live = _live_session_agent_db(session)
     if live is None or not hasattr(live[0], "_build_system_prompt") or not hasattr(live[2], "update_system_prompt"):
         return
@@ -1813,6 +1847,8 @@ def _load_enabled_toolsets(platform: str | None = None) -> list[str] | None:
     coding posture (coding_context collapses to coding toolset + enabled MCP servers in a code workspace);
     else the configured CLI toolsets. Client-surface toolsets fold in here — only this surface can answer them."""
     session_platform = platform or _resolve_session_platform()
+    if is_truthy_value(os.environ.get("HERMES_TUI_NO_TOOLS")):
+        return []
     explicit = [item.strip() for item in os.environ.get("HERMES_TUI_TOOLSETS", "").split(",") if item.strip()]
     fallback_notice = None
     if not explicit:
@@ -1842,7 +1878,7 @@ def _load_enabled_toolsets(platform: str | None = None) -> list[str] | None:
         enabled = _get_platform_tools(cfg, "cli", include_default_mcp_servers=True)
         if fallback_notice is not None:
             _tui_notice(fallback_notice)
-        return sorted(enabled | _gui_surface_toolsets(session_platform)) if enabled else None
+        return [] if not enabled else sorted(enabled | _gui_surface_toolsets(session_platform))
     except Exception:
         if fallback_notice is not None:
             _tui_notice("[tui] no valid HERMES_TUI_TOOLSETS entries and configured CLI toolsets could not be loaded; enabling all toolsets")
@@ -1867,6 +1903,8 @@ def _tool_lifecycle_required_for_ui(name: str) -> bool:
 
 
 def _restart_slash_worker(sid: str, session: dict):
+    if _gateway_stateless():
+        return None
     # Close the slash-worker subprocess as part of finalize itself, not just in the callers.
     # Defense-in-depth: every session-end path goes through _finalize_session (it's the single
     # ``_finalized``-guarded chokepoint), so folding worker cleanup in here means a future code path that
@@ -2267,13 +2305,15 @@ def _make_agent(
     if synthetic is not None:
         return synthetic
     from run_agent import AIAgent
+    no_tools = is_truthy_value(os.environ.get("HERMES_TUI_NO_TOOLS"))
     # MCP discovery runs in a daemon thread (a dead server can't freeze the shell); the agent snapshots its tool
     # list once, so briefly wait for in-flight discovery. Dashboard /api/ws uses mcp_startup; TUI stdio uses entry.
-    for _mod in ("hermes_cli.mcp_startup", "tui_gateway.entry"):
-        with contextlib.suppress(Exception):
-            importlib.import_module(_mod).wait_for_mcp_discovery()
+    if not no_tools:
+        for _mod in ("hermes_cli.mcp_startup", "tui_gateway.entry"):
+            with contextlib.suppress(Exception):
+                importlib.import_module(_mod).wait_for_mcp_discovery()
     cfg = _load_cfg()
-    system_prompt = _startup_system_prompt(cfg, session_id or key)
+    system_prompt = "" if no_tools else _startup_system_prompt(cfg, session_id or key)
     model, runtime = _resolve_agent_model_runtime(model_override, provider_override)
     _pr = _load_provider_routing()
     platform = _resolve_agent_platform(platform_override)
@@ -2287,15 +2327,26 @@ def _make_agent(
         reasoning_config=(
             reasoning_config_override if reasoning_config_override is not None else _load_reasoning_config(str(model or ""))),
         service_tier=service_tier_override if service_tier_override is not None else _load_service_tier(),
-        enabled_toolsets=_load_enabled_toolsets(platform),
+        enabled_toolsets=_load_enabled_toolsets(platform), no_tools=no_tools,
         # OpenRouter provider_routing prefs (gateway + CLI parity).
         providers_allowed=_pr.get("only"), providers_ignored=_pr.get("ignore"), providers_order=_pr.get("order"),
         provider_sort=_pr.get("sort"), provider_require_parameters=_pr.get("require_parameters", False),
         provider_data_collection=_pr.get("data_collection"), platform=platform, session_id=session_id or key,
-        session_db=session_db if session_db is not None else _get_db(), ephemeral_system_prompt=system_prompt or None,
-        checkpoints_enabled=is_truthy_value(os.environ.get("HERMES_TUI_CHECKPOINTS")),
+        session_db=None if no_tools or is_truthy_value(os.environ.get("HERMES_TUI_NO_SESSION_PERSISTENCE"))
+        else session_db if session_db is not None else _get_db(),
+        ephemeral_system_prompt=system_prompt or None,
+        checkpoints_enabled=(
+            not no_tools and is_truthy_value(os.environ.get("HERMES_TUI_CHECKPOINTS"))
+        ),
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
-        skip_context_files=ignore_rules, skip_memory=ignore_rules, fallback_model=_load_fallback_model(),
+        skip_context_files=(no_tools or ignore_rules or is_truthy_value(os.environ.get("HERMES_TUI_NO_CONTEXT_FILES"))),
+        skip_memory=(no_tools or ignore_rules or is_truthy_value(os.environ.get("HERMES_TUI_NO_MEMORY"))),
+        skip_background_review=(no_tools or is_truthy_value(os.environ.get("HERMES_TUI_NO_BACKGROUND_REVIEW"))),
+        disable_session_persistence=(no_tools or is_truthy_value(os.environ.get("HERMES_TUI_NO_SESSION_PERSISTENCE"))),
+        fallback_model=(
+            None if no_tools or is_truthy_value(os.environ.get("HERMES_TUI_NO_FALLBACKS"))
+            else _load_fallback_model()
+        ),
         **_agent_cbs(sid))
     if context_cwd_is_launch_artifact is None:
         with _sessions_lock:

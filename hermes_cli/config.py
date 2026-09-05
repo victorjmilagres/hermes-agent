@@ -648,6 +648,17 @@ def ensure_hermes_home():
     """Ensure the ~/.hermes directory skeleton exists with secure permissions.
     Memoized per home path: this runs on EVERY ``load_config()`` and the ~14 mkdir/chmod syscalls
     made repeated loads the dominant cost of hot read paths."""
+    if any(
+        str(os.environ.get(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+        for name in ("HERMES_TUI_NO_TOOLS", "HERMES_TUI_NO_SESSION_PERSISTENCE")
+    ):
+        return
+    try:
+        from agent.persistence_context import session_persistence_disabled
+        if session_persistence_disabled():
+            return
+    except ImportError:
+        pass
     home = get_hermes_home()
     key = str(home)
 

@@ -313,6 +313,7 @@ def load_hermes_dotenv(
     hermes_home: str | os.PathLike | None = None,
     project_env: str | os.PathLike | None = None,
     load_external_secrets: bool = True,
+    reapply_terminal_config: bool = True,
 ) -> list[Path]:
     """Load Hermes env files: ``~/.hermes/.env`` overrides stale shell exports; project ``.env`` is a dev
     fallback that only fills gaps when the user env exists (and overrides shell vars when it does not)."""
@@ -388,7 +389,8 @@ def load_hermes_dotenv(
     # reload. Startup launchers bridge config→env once, but long-lived processes (gateway per-turn reload,
     # cron standalone runs) call load_hermes_dotenv() repeatedly and used to flip the effective backend back
     # to the stale .env value mid-session (#29186, #67323).
-    _reapply_terminal_config_bridge(home_path)
+    if reapply_terminal_config:
+        _reapply_terminal_config_bridge(home_path)
 
     return loaded
 

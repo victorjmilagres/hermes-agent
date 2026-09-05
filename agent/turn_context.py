@@ -582,6 +582,8 @@ def _collect_pre_llm_call_context(
     """Run ``pre_llm_call`` plugins; their context is injected into the user message
     (never the system prompt). Oversized per-hook context is spilled to disk so a
     runaway plugin can't inflate every subsequent turn's prompt."""
+    if getattr(agent, "no_tools", False):
+        return ""
     try:
         from hermes_cli.lifecycle import invoke_hook as _invoke_hook
         _pre_results = _invoke_hook(
@@ -835,12 +837,13 @@ def build_turn_context(
 
     # Bot Mode DM tool — injected ONLY into a bot's canonical "Bot Chat" session (same
     # gate as the protocol section); gate is session-stable, so cache-safe.
-    try:
-        from tools.bot_mode_dm import ensure_message_agent_tool
+    if not getattr(agent, "no_tools", False):
+        try:
+            from tools.bot_mode_dm import ensure_message_agent_tool
 
-        ensure_message_agent_tool(agent)
-    except Exception:
-        logger.debug("message_agent injection skipped", exc_info=True)
+            ensure_message_agent_tool(agent)
+        except Exception:
+            logger.debug("message_agent injection skipped", exc_info=True)
 
     _ensure_session_row(agent, pending_cli_message)
 
@@ -855,14 +858,16 @@ def build_turn_context(
     conversation_history = compaction.conversation_history
     current_turn_user_idx = compaction.current_turn_user_idx
 
-    plugin_user_context = _collect_pre_llm_call_context(
-        agent, effective_task_id=effective_task_id, turn_id=turn_id,
-        original_user_message=original_user_message, messages=messages,
-        conversation_history=conversation_history,
-    )
-    plugin_user_context = _merge_gateway_notes(
-        agent, messages, current_turn_user_idx, plugin_user_context
-    )
+    plugin_user_context = ""
+    if not getattr(agent, "no_tools", False):
+        plugin_user_context = _collect_pre_llm_call_context(
+            agent, effective_task_id=effective_task_id, turn_id=turn_id,
+            original_user_message=original_user_message, messages=messages,
+            conversation_history=conversation_history,
+        )
+        plugin_user_context = _merge_gateway_notes(
+            agent, messages, current_turn_user_idx, plugin_user_context
+        )
 
     _bind_interrupt_scope(agent, ra)
     ext_prefetch_cache = _memory_turn_start_and_prefetch(agent, original_user_message)

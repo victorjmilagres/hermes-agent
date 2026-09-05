@@ -46,6 +46,28 @@ def _make_agent(session_db=None, prebuilt_prompt: str = "BUILT_PROMPT"):
 
 
 class TestStoredPromptReuse:
+    def test_no_tools_resume_rebuilds_without_historical_prompt_or_tool_prefix(self, monkeypatch):
+        db = MagicMock()
+        db.get_session.return_value = {
+            "system_prompt": "USE terminal and read_file now",
+            "tool_names": '["terminal"]',
+        }
+        agent = _make_agent(session_db=db, prebuilt_prompt="NO TOOLS PROMPT")
+        agent.no_tools = True
+        restored = []
+        monkeypatch.setattr(
+            "tools.mcp_tool_agent.restore_agent_tool_prefix",
+            lambda *_args: restored.append(True),
+        )
+
+        _restore_or_build_system_prompt(
+            agent, None, [{"role": "user", "content": "historical turn"}],
+        )
+
+        assert agent._cached_system_prompt == "NO TOOLS PROMPT"
+        agent._build_system_prompt.assert_called_once_with(None)
+        assert restored == []
+
     def test_present_row_is_reused_verbatim(self, caplog):
         """Continuing session with a stored prompt → reuse byte-for-byte."""
         stored = "Stored prompt from turn 1 — byte-identical reuse"

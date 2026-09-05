@@ -338,6 +338,8 @@ def _start_backend_heartbeat_refresher() -> None:
     """Register this backend and start the refresher thread (once per process). The first refresh writes the row
     synchronously so this process's own sweep sees itself in the heartbeat table. ``_HEARTBEAT_REFRESH_S <= 0``
     means "register once, never refresh"."""
+    if _gateway_stateless():
+        return
     global _heartbeat_refresher_started
     with _heartbeat_refresher_lock:
         if _heartbeat_refresher_started:
@@ -376,6 +378,8 @@ def _schedule_startup_orphan_sweep() -> None:
 
     See #65194.
     """
+    if _gateway_stateless():
+        return
     global _startup_orphan_sweep_ran
     if _WS_ORPHAN_REAP_GRACE_S <= 0 or _SESSION_TTL_S <= 0 or not _session_orphan_reaper_enabled():
         return

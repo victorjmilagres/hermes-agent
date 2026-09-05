@@ -833,6 +833,8 @@ def _(rid, params: dict) -> dict:
     cmd = params.get("command", "").strip()
     if not cmd:
         return _err(rid, 4004, "empty command")
+    if _gateway_stateless():
+        return _err(rid, 4018, "slash commands are unavailable in stateless mode")
     # Skill/bundle and _PENDING_INPUT_COMMANDS must NOT reach the slash worker. Plugin
     # commands also bypass it but return normal slash.exec output (TUI keeps the pager path).
     parts = cmd.lstrip("/").split(maxsplit=1)

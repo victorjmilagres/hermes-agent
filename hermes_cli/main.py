@@ -140,6 +140,12 @@ def _run_and_exit_oneshot(
     toolsets: object = None,
     skills: object = None,
     usage_file: object = None,
+    no_tools: bool = False,
+    no_context_files: bool = False,
+    no_memory: bool = False,
+    no_background_review: bool = False,
+    no_fallbacks: bool = False,
+    no_session_persistence: bool = False,
 ) -> None:
     try:
         from hermes_cli.oneshot import run_oneshot
@@ -151,6 +157,12 @@ def _run_and_exit_oneshot(
             toolsets=toolsets,
             skills=skills,
             usage_file=usage_file,
+            no_tools=no_tools,
+            skip_context_files=no_context_files,
+            skip_memory=no_memory,
+            skip_background_review=no_background_review,
+            disable_fallbacks=no_fallbacks,
+            disable_session_persistence=no_session_persistence,
         )
     except KeyboardInterrupt:
         rc = 130
@@ -1647,12 +1659,38 @@ _CHAT_PASSTHROUGH = (
     ("provider", None), ("toolsets", None), ("skills", None), ("verbose", None),
     ("quiet", False), ("query", None), ("image", None), ("resume", None),
     ("worktree", False), ("checkpoints", False), ("pass_session_id", False),
-    ("max_turns", None),
+    ("max_turns", None), ("no_tools", False), ("no_context_files", False),
+    ("no_memory", False), ("no_background_review", False), ("no_fallbacks", False),
+    ("no_session_persistence", False),
 )
+
+
+def _normalize_zero_tools_args(args) -> None:
+    """Resolve the explicit-none posture before any startup discovery."""
+    from hermes_cli.oneshot import _resolve_zero_tools
+
+    no_tools, error = _resolve_zero_tools(
+        getattr(args, "no_tools", False), getattr(args, "toolsets", None),
+        command_label="hermes chat",
+    )
+    if error:
+        print(error.rstrip(), file=sys.stderr)
+        raise SystemExit(2)
+    if not no_tools:
+        return
+    args.no_tools = True
+    args.toolsets = None
+    for name in (
+        "no_context_files", "no_memory", "no_background_review", "no_fallbacks",
+        "no_session_persistence",
+    ):
+        setattr(args, name, True)
+    args.resume = None
 
 
 def cmd_chat(args):
     """Run interactive chat CLI."""
+    _normalize_zero_tools_args(args)
     _apply_safe_mode(args)
     _apply_user_config_bypass(args)
     _guard_noninteractive_user_config(args)
@@ -1667,7 +1705,8 @@ def cmd_chat(args):
         _first_run_setup_guard(args)
         return
 
-    _start_chat_background_prefetch()
+    if not getattr(args, "no_tools", False):
+        _start_chat_background_prefetch()
 
     # --yolo: bypass all dangerous command approvals. main() also sets this
     # before _prepare_agent_startup() — the authoritative site, since it runs
@@ -2731,6 +2770,11 @@ def _prepare_agent_startup(args) -> None:
     if not (args.command in _AGENT_COMMANDS or _agent_subcommand_selected(args)):
         return
 
+    # Zero-tools is an isolation posture: startup discovery/registration would
+    # execute third-party code before the agent-level invariant exists.
+    if getattr(args, "no_tools", False):
+        return
+
     _accept_hooks = bool(getattr(args, "accept_hooks", False))
     if not _is_tui_chat_launch(args):
         # The TUI backend does its own discovery; the launcher only spawns Node.
@@ -2884,6 +2928,12 @@ def _run_oneshot_from_args(args) -> None:
         toolsets=getattr(args, "toolsets", None),
         skills=getattr(args, "skills", None),
         usage_file=getattr(args, "usage_file", None),
+        no_tools=getattr(args, "no_tools", False),
+        no_context_files=getattr(args, "no_context_files", False),
+        no_memory=getattr(args, "no_memory", False),
+        no_background_review=getattr(args, "no_background_review", False),
+        no_fallbacks=getattr(args, "no_fallbacks", False),
+        no_session_persistence=getattr(args, "no_session_persistence", False),
     )
 
 
@@ -3369,6 +3419,10 @@ def main():
         sys.exit(1)  # unreachable: execvp replaces the process or raises
 
     args = _parse_cli_args(parser, subparsers, sys.argv[1:])
+
+    # Must precede plugin/MCP/hooks/webhook discovery and every chat startup helper.
+    if args.command in _AGENT_COMMANDS or _agent_subcommand_selected(args):
+        _normalize_zero_tools_args(args)
 
     if args.version:
         cmd_version(args)

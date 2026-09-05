@@ -404,11 +404,13 @@ class ProcessRegistry:
         import queue as _queue_mod
         self.completion_queue: _queue_mod.Queue = _queue_mod.Queue()
         # Rehydrate durable delegation completions once, at registry startup.
-        try:
-            from tools.async_delegation import restore_undelivered_completions
-            restore_undelivered_completions(self.completion_queue)
-        except Exception as exc:
-            logger.warning("Could not restore async delegation completions: %s", exc)
+        from agent.persistence_context import session_persistence_disabled
+        if not session_persistence_disabled():
+            try:
+                from tools.async_delegation import restore_undelivered_completions
+                restore_undelivered_completions(self.completion_queue)
+            except Exception as exc:
+                logger.warning("Could not restore async delegation completions: %s", exc)
         # Completions the agent already consumed via wait()/read_log() (output in
         # hand): drain loops AND gateway/tui watchers skip them.
         self._completion_consumed: set = set()

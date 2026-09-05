@@ -643,6 +643,11 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     Mutates ``agent._cached_system_prompt`` and persists a freshly-built prompt on first
     build. Row states ``missing``/``null``/``empty``/``present`` are logged and DB
     failures log at WARNING so silent prefix-cache misses show in ``agent.log``."""
+    if getattr(agent, "no_tools", False) is True:
+        # Historical prompt/tool bytes were built under another capability posture.
+        agent._cached_system_prompt = agent._build_system_prompt(system_message)
+        return
+
     stored_prompt = None
     stored_state = "missing"
     session_row = None
