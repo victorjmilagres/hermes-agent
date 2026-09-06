@@ -11,6 +11,7 @@ import concurrent.futures as cf
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -79,6 +80,26 @@ def _terminate_and_reap(proc: Optional[subprocess.Popen], *, grace: float = _TER
         return proc.poll() is not None
 
     try:
+        if sys.platform != "win32":
+            # _spawn_worker owns a fresh session. A descendant can retain pipes
+            # or ignore TERM after its leader exits, so poll() alone cannot
+            # establish that the search has stopped.
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.killpg(proc.pid, sig)
+                except ProcessLookupError:
+                    break
+                if sig == signal.SIGTERM:
+                    deadline = time.monotonic() + grace
+                    while time.monotonic() < deadline:
+                        proc.poll()
+                        try:
+                            os.killpg(proc.pid, 0)
+                        except ProcessLookupError:
+                            break
+                        time.sleep(0.05)
+            proc.wait(timeout=grace)
+            return
         for escalate in (proc.terminate, proc.kill):
             if proc.poll() is None:
                 escalate()
