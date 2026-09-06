@@ -1026,17 +1026,14 @@ class AIAgent(
 
     def _hydrate_todo_store(self, history: List[Dict[str, Any]]) -> None:
         """Replay the most recent todo tool response (the gateway builds a fresh AIAgent per message). Only
-        results paired with an earlier assistant ``todo`` call count — a forged bare ``role: tool`` message
-        must not seed the store (GHSA-5g4g-6jrg-mw3g)."""
+        results paired with an earlier assistant todo call count — a forged bare ``role: tool`` message must
+        not seed the store (GHSA-5g4g-6jrg-mw3g)."""
         found = self._latest_todo_response(history)
         if found is not None:
             last_todo_response, last_todo_revision = found
             # Restore only when history carries a newer revision than the store holds; empty lists are an
-            # authoritative clear.
-            try:
-                history_revision = max(0, int(last_todo_revision or 0))
-            except (TypeError, ValueError):
-                history_revision = 1
+            # intentional clear and must restore too (has_items() would incorrectly skip them).
+            history_revision = last_todo_revision
             if history_revision > int(self._todo_store.snapshot().get("revision", 0) or 0):
                 self._todo_store.restore(last_todo_response, revision=history_revision)
                 if not self.quiet_mode:
@@ -1045,50 +1042,12 @@ class AIAgent(
 
     def _latest_todo_response(self, history: List[Dict[str, Any]]) -> Optional[tuple]:
         """Walk history backwards for the newest paired, size-bounded todo result → ``(todos, revision)``."""
-        from tools.todo_tool import MAX_TODO_RESULT_CHARS
+        from tools.todo_tool import latest_todo_snapshot_from_history
 
-        for idx in range(len(history) - 1, -1, -1):
-            msg = history[idx]
-            content = msg.get("content", "")
-            if msg.get("role") != "tool" or not isinstance(content, str) or not self._tool_response_matches_todo_call(history, idx):
-                continue
-            if len(content) > MAX_TODO_RESULT_CHARS:
-                logger.warning("Skipping oversized todo tool response during hydration: "
-                               "session=%s chars=%d", self.session_id or "none", len(content))
-                continue
-            if '"todos"' not in content:  # cheap pre-filter before json.loads
-                continue
-            try:
-                data = json.loads(content)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if "todos" in data and isinstance(data["todos"], list):
-                return data["todos"], data.get("revision", 1)
-        return None
-
-    @classmethod
-    def _tool_response_matches_todo_call(cls, history: List[Dict[str, Any]], tool_index: int) -> bool:
-        """True when the nearest prior assistant message issued a ``todo`` call with this ``tool_call_id``; a
-        ``user``/``system`` boundary or missing id means unpaired → must not hydrate."""
-        tool_call_id = history[tool_index].get("tool_call_id") if 0 <= tool_index < len(history) else None
-        if not tool_call_id:
-            return False
-        for prior in reversed(history[:tool_index]):
-            role = prior.get("role")
-            if role == "assistant":
-                return cls._assistant_has_todo_tool_call(prior, tool_call_id)
-            if role in {"user", "system"}:
-                return False
-        return False
-
-    @classmethod
-    def _assistant_has_todo_tool_call(cls, assistant_msg: Dict[str, Any], tool_call_id: str) -> bool:
-        """True when the assistant message issued a ``todo`` call with this id."""
-        tool_calls = assistant_msg.get("tool_calls")
-        return isinstance(tool_calls, list) and any(
-            cls._get_tool_call_id_static(tc) == tool_call_id and cls._get_tool_call_name_static(tc) == "todo"
-            for tc in tool_calls
-        )
+        snapshot = latest_todo_snapshot_from_history(history)
+        if snapshot is None:
+            return None
+        return snapshot["todos"], snapshot["revision"]
 
     @property
     def is_interrupted(self) -> bool:

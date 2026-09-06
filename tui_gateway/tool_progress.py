@@ -111,18 +111,16 @@ def _tool_summary(name: str, result: str, duration_s: float | None) -> str | Non
 
 def _normalize_todo_state(value: object) -> dict | None:
     """Return a client-safe full todo snapshot or ``None`` when malformed."""
-    if not isinstance(value, dict) or not isinstance(value.get("todos"), list):
+    from tools.todo_tool import normalize_todo_snapshot
+
+    state = normalize_todo_snapshot(value)
+    if state is None:
         return None
-    try:
-        revision = max(0, int(value.get("revision") or 0))
-    except (TypeError, ValueError):
-        return None
-    todos = list(value["todos"])
     # Unused TodoStore snapshot() is {todos: [], revision: 0}: attaching it on resume stamps a client
     # watermark and blocks unversioned tool.start merges. Empty at revision >= 1 is a real clear.
-    if not todos and revision == 0:
+    if not state["todos"] and state["revision"] == 0:
         return None
-    return {"todos": todos, "revision": revision}
+    return state
 
 
 def _cache_todo_state(session: dict, state: dict | None) -> None:
@@ -159,30 +157,13 @@ def _attach_todo_state(payload: dict, session: dict) -> dict:
 
 def _todo_state_from_history(history) -> dict | None:
     """Latest todo snapshot from a loaded transcript, for resume paths that answer before an AIAgent (and
-    its live TodoStore) exists: the newest tool result paired with an assistant ``todo`` call IS it."""
+    its live TodoStore) exists: the newest tool result paired with an assistant todo call IS it."""
     if not isinstance(history, list) or not history:
         return None
     try:
-        from tools.todo_tool import MAX_TODO_RESULT_CHARS
-        todo_call_ids = {
-            call.get("id")
-            for msg in history if isinstance(msg, dict)
-            for call in msg.get("tool_calls") or []
-            if (call.get("function") or {}).get("name") in _TODO_TOOL_NAMES and call.get("id")
-        }
-        if not todo_call_ids:
-            return None
-        for msg in reversed(history):
-            if not isinstance(msg, dict) or msg.get("role") != "tool" or msg.get("tool_call_id") not in todo_call_ids:
-                continue
-            content = msg.get("content", "")
-            if not isinstance(content, str) or len(content) > MAX_TODO_RESULT_CHARS or '"todos"' not in content:
-                continue
-            try:
-                return _normalize_todo_state(json.loads(content))
-            except Exception:
-                continue
-        return None
+        from tools.todo_tool import latest_todo_snapshot_from_history
+
+        return _normalize_todo_state(latest_todo_snapshot_from_history(history))
     except Exception:
         logger.debug("failed to derive todo state from history", exc_info=True)
         return None

@@ -883,7 +883,12 @@ class TestInterrupt:
 
 class TestHydrateTodoStore:
     @staticmethod
-    def _assistant_todo_call(call_id="c1"):
+    def _assistant_todo_call(call_id="c1", name="todo"):
+        arguments = (
+            {"name": "todo_list", "arguments": {}}
+            if name == "tool_call"
+            else {}
+        )
         return {
             "role": "assistant",
             "content": None,
@@ -891,7 +896,7 @@ class TestHydrateTodoStore:
                 {
                     "id": call_id,
                     "type": "function",
-                    "function": {"name": "todo", "arguments": "{}"},
+                    "function": {"name": name, "arguments": json.dumps(arguments)},
                 }
             ],
         }
@@ -954,6 +959,122 @@ class TestHydrateTodoStore:
 
         assert agent._todo_store.snapshot()["revision"] == 2
         assert agent._todo_store.read()[0]["id"] == "new"
+
+    def test_malformed_newest_snapshot_falls_back_without_crashing(self, agent):
+        history = [
+            self._assistant_todo_call("older"),
+            {
+                "role": "tool",
+                "tool_call_id": "older",
+                "content": json.dumps(
+                    {
+                        "todos": [{"id": "old", "content": "Older", "status": "pending"}],
+                        "revision": 4,
+                    }
+                ),
+            },
+            self._assistant_todo_call("newest"),
+            {"role": "tool", "tool_call_id": "newest", "content": '["todos"]'},
+        ]
+
+        with patch("run_agent._set_interrupt"), patch("agent.interrupt_control._set_interrupt"):
+            agent._hydrate_todo_store(history)
+
+        assert agent._todo_store.snapshot()["revision"] == 4
+        assert agent._todo_store.read()[0]["id"] == "old"
+
+    def test_current_and_deferred_todo_calls_hydrate(self, agent):
+        for revision, name in enumerate(("todo_list", "tool_call"), start=2):
+            call_id = f"c{revision}"
+            history = [
+                self._assistant_todo_call(call_id, name),
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": json.dumps(
+                        {
+                            "todos": [
+                                {
+                                    "id": name,
+                                    "content": "Recovered",
+                                    "status": "pending",
+                                }
+                            ],
+                            "revision": revision,
+                        }
+                    ),
+                },
+            ]
+
+            with patch("run_agent._set_interrupt"), patch(
+                "agent.interrupt_control._set_interrupt"
+            ):
+                agent._hydrate_todo_store(history)
+
+            assert agent._todo_store.snapshot()["revision"] == revision
+            assert agent._todo_store.read()[0]["id"] == name
+
+        malformed_call = self._assistant_todo_call("bad", "tool_call")
+        malformed_call["tool_calls"][0]["function"]["arguments"] = json.dumps(
+            {"name": "todo_list", "arguments": []}
+        )
+        invalid_histories = [
+            [
+                malformed_call,
+                {
+                    "role": "tool",
+                    "tool_call_id": "bad",
+                    "content": json.dumps({"todos": [], "revision": 99}),
+                },
+            ],
+            [
+                self._assistant_todo_call("paired", "todo_list"),
+                {
+                    "role": "tool",
+                    "tool_call_id": "unpaired",
+                    "content": json.dumps({"todos": [], "revision": 99}),
+                },
+            ],
+        ]
+        for history in invalid_histories:
+            with patch("run_agent._set_interrupt"), patch(
+                "agent.interrupt_control._set_interrupt"
+            ):
+                agent._hydrate_todo_store(history)
+
+        assert agent._todo_store.snapshot()["revision"] == 3
+        assert agent._todo_store.read()[0]["id"] == "tool_call"
+
+    @pytest.mark.parametrize("bad_role", [None, 1, [], {}])
+    def test_malformed_role_fails_closed_without_mutating_store(self, agent, bad_role):
+        agent._todo_store.restore(
+            [{"id": "live", "content": "Keep", "status": "pending"}],
+            revision=6,
+        )
+        history = [
+            self._assistant_todo_call("older"),
+            {
+                "role": "tool",
+                "tool_call_id": "older",
+                "content": json.dumps(
+                    {
+                        "todos": [{"id": "old", "content": "Old", "status": "pending"}],
+                        "revision": 7,
+                    }
+                ),
+            },
+            {"role": bad_role, "content": "malformed"},
+        ]
+
+        with patch("run_agent._set_interrupt"), patch(
+            "agent.interrupt_control._set_interrupt"
+        ):
+            agent._hydrate_todo_store(history)
+
+        assert agent._todo_store.snapshot() == {
+            "todos": [{"id": "live", "content": "Keep", "status": "pending"}],
+            "revision": 6,
+        }
 
 
 
