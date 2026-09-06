@@ -15,12 +15,198 @@ MAX_TODO_ITEMS = 256
 # Max single todo tool-result payload accepted during history hydration, so a forged
 # oversized result is dropped before parsing (AIAgent._hydrate_todo_store).
 MAX_TODO_RESULT_CHARS = 512_000
+# Deferred-call arguments are persisted as JSON strings too. Bound them before
+# decoding so history hydration cannot spend unbounded work recognizing a call.
+MAX_TODO_DEFERRED_ENVELOPE_CHARS = 512_000
 _TRUNCATION_MARKER = "… [truncated]"
 # Persisted as ordinary message content; ContextCompressor keys on this stable header to
 # tell the synthetic post-compaction row from a real user message.
 TODO_INJECTION_HEADER = "[Your active task list was preserved across context compression]"
 _STATUS_MARKERS = {"completed": "[x]", "in_progress": "[>]", "pending": "[ ]", "cancelled": "[~]"}
 _ACTIVE_STATUSES = {"pending", "in_progress"}
+_TODO_TOOL_NAMES = frozenset({"todo", "todo_list"})
+
+
+def is_todo_tool_call(call: Any) -> bool:
+    """Whether a persisted call invokes the todo tool directly or through ``tool_call``."""
+    function = call.get("function") if isinstance(call, dict) else getattr(call, "function", None)
+    if isinstance(function, dict):
+        name = function.get("name")
+        arguments = function.get("arguments")
+    else:
+        name = getattr(function, "name", None)
+        arguments = getattr(function, "arguments", None)
+    if isinstance(name, str) and name in _TODO_TOOL_NAMES:
+        return True
+    if name != "tool_call":
+        return False
+    if isinstance(arguments, str):
+        if len(arguments) > MAX_TODO_DEFERRED_ENVELOPE_CHARS:
+            return False
+        try:
+            arguments = json.loads(arguments)
+        except (ValueError, TypeError, RecursionError):
+            return False
+    if (
+        not isinstance(arguments, dict)
+        or not _decoded_json_within_limit(arguments, MAX_TODO_DEFERRED_ENVELOPE_CHARS)
+        or set(arguments) != {"name", "arguments"}
+        or arguments.get("name") != "todo_list"
+    ):
+        return False
+    underlying_arguments = arguments.get("arguments")
+    if isinstance(underlying_arguments, str):
+        if len(underlying_arguments) > MAX_TODO_DEFERRED_ENVELOPE_CHARS:
+            return False
+        try:
+            underlying_arguments = json.loads(underlying_arguments)
+        except (ValueError, TypeError, RecursionError):
+            return False
+    return (
+        isinstance(underlying_arguments, dict)
+        and _decoded_json_within_limit(
+            underlying_arguments, MAX_TODO_DEFERRED_ENVELOPE_CHARS
+        )
+    )
+
+
+def _call_id(call: Any) -> Any:
+    return call.get("id") if isinstance(call, dict) else getattr(call, "id", None)
+
+
+def _decoded_json_within_limit(value: Any, limit: int) -> bool:
+    """Bound already-decoded JSON without re-encoding or recursive descent."""
+    remaining = limit
+    stack = [value]
+    seen_containers = set()
+    while stack:
+        current = stack.pop()
+        remaining -= 1
+        if remaining < 0:
+            return False
+        if isinstance(current, str):
+            remaining -= len(current)
+        elif isinstance(current, dict):
+            identity = id(current)
+            if identity in seen_containers:
+                return False
+            seen_containers.add(identity)
+            if len(current) > remaining:
+                return False
+            for key, item in current.items():
+                if not isinstance(key, str):
+                    return False
+                remaining -= len(key)
+                if remaining < len(stack) + 1:
+                    return False
+                stack.append(item)
+        elif isinstance(current, list):
+            identity = id(current)
+            if identity in seen_containers:
+                return False
+            seen_containers.add(identity)
+            if len(current) + len(stack) > remaining:
+                return False
+            stack.extend(current)
+        elif current is not None and not isinstance(current, (bool, int, float)):
+            return False
+        if remaining < 0:
+            return False
+    return True
+
+
+def normalize_todo_snapshot(value: Any) -> Optional[Dict[str, Any]]:
+    """Project the shared snapshot shape; history applies its own input budget."""
+    if (
+        not isinstance(value, dict)
+        or not {"todos", "revision"}.issubset(value)
+        or not set(value).issubset({"todos", "revision", "summary"})
+        or not isinstance(value["todos"], list)
+        or len(value["todos"]) > MAX_TODO_ITEMS
+        or ("summary" in value and not isinstance(value["summary"], dict))
+    ):
+        return None
+    revision = value["revision"]
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+        return None
+    return {"todos": list(value["todos"]), "revision": revision}
+
+
+def _snapshot_from_result_content(content: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(content, str):
+        if len(content) > MAX_TODO_RESULT_CHARS or '\"todos\"' not in content:
+            return None
+        try:
+            content = json.loads(content)
+        except (ValueError, TypeError, RecursionError):
+            return None
+    if not _decoded_json_within_limit(content, MAX_TODO_RESULT_CHARS):
+        return None
+    return normalize_todo_snapshot(content)
+
+
+def latest_todo_snapshot_from_history(history: Any) -> Optional[Dict[str, Any]]:
+    """Newest valid todo result from one bounded reverse pass with one-to-one pairing."""
+    if not isinstance(history, list):
+        return None
+    pending_results: Dict[str, tuple[int, Any]] = {}
+    latest_snapshot = None
+    for index in range(len(history) - 1, -1, -1):
+        message = history[index]
+        if not isinstance(message, dict):
+            return None
+        role = message.get("role")
+        if not isinstance(role, str):
+            return None
+        if latest_snapshot is not None:
+            # Keep structural validation of the transcript, but never decode
+            # obsolete results after selecting the newest authoritative group.
+            continue
+        if role in {"user", "system"}:
+            pending_results.clear()
+            continue
+        if role == "tool":
+            tool_call_id = message.get("tool_call_id")
+            if isinstance(tool_call_id, str) and tool_call_id:
+                # Traversing backward means replacement keeps the result nearest its call.
+                pending_results[tool_call_id] = (
+                    index,
+                    message.get("content"),
+                )
+            continue
+        if role != "assistant":
+            continue
+        calls = message.get("tool_calls")
+        if not isinstance(calls, list):
+            pending_results.clear()
+            continue
+        call_ids = [_call_id(call) for call in calls]
+        seen_ids = set()
+        duplicate_ids = set()
+        for call_id in call_ids:
+            if not isinstance(call_id, str):
+                continue
+            if call_id in seen_ids:
+                duplicate_ids.add(call_id)
+            else:
+                seen_ids.add(call_id)
+        matches = []
+        for call, call_id in zip(calls, call_ids):
+            if (
+                isinstance(call_id, str)
+                and call_id
+                and call_id not in duplicate_ids
+                and call_id in pending_results
+                and is_todo_tool_call(call)
+            ):
+                result_index, content = pending_results[call_id]
+                snapshot = _snapshot_from_result_content(content)
+                if snapshot is not None:
+                    matches.append((result_index, snapshot))
+        if matches and latest_snapshot is None:
+            latest_snapshot = max(matches, key=lambda match: match[0])[1]
+        pending_results.clear()
+    return latest_snapshot
 
 
 class TodoStore:
@@ -199,7 +385,7 @@ def todo_tool(todos: Optional[List[Dict[str, Any]]] = None, merge: bool = False,
         if isinstance(todos, str):  # LLMs sometimes send a JSON string instead of a list
             try:
                 todos = json.loads(todos)
-            except (json.JSONDecodeError, TypeError):
+            except (ValueError, TypeError, RecursionError):
                 return tool_error("todos must be a list of objects, got unparseable string")
         if not isinstance(todos, list):
             return tool_error(f"todos must be a list, got {type(todos).__name__}")
