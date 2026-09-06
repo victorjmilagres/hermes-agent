@@ -28,3 +28,11 @@ History retains its 512,000-character per-result budget. Valid live store
 snapshots do not inherit that historical-input restriction. Structural history
 validation remains fail-closed even after finding the latest snapshot, while
 obsolete contents are no longer decoded.
+
+## Fork integration
+
+The reviewed commit was cherry-picked onto fork main `4055c106` in a separate
+worktree. Its stable patch ID is identical to the reviewed original, preserving
+the inherited work and authorship. This base includes explicit no-tools mode.
+Ruff and diff checks passed again; 31 no-tools boundary/gateway tests also passed.
+The seven-file todo/session suite passed again on this base: 371 tests, no failures.
